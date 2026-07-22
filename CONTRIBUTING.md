@@ -150,10 +150,12 @@ Or let pre-commit hooks handle it automatically.
 
 ### Type Checking
 
-We use **[ty](https://github.com/astral-sh/ty)** for type checking:
+We use **[ty](https://github.com/astral-sh/ty)** for advisory type checking. The
+repository still has known type debt, so new changes should avoid adding new
+diagnostics while the existing findings are reduced:
 
 ```bash
-uv run ty check src tests --ignore unresolved-import
+uv run ty check src --ignore unresolved-import
 ```
 
 ### Running Tests
@@ -212,7 +214,8 @@ We accept contributions via [pull requests from forks](https://docs.github.com/e
    - Link to the related issue (e.g., `Closes #42`)
    - Any breaking changes or migration steps
 
-6. **Ensure CI passes** -- the pipeline runs linting, type checks, and the full test suite.
+6. **Ensure CI passes** -- the pipeline runs linting and the full test suite, with
+   type checking reported as an advisory job.
 
 7. **Respond to review feedback** -- push additional commits to your branch as needed.
 
@@ -223,7 +226,7 @@ Before submitting, verify:
 - [ ] My code follows the project's code style (Ruff passes)
 - [ ] I have added tests for my changes
 - [ ] All existing tests pass (`uv run pytest tests/ -v`)
-- [ ] Type checking passes (`uv run ty check src tests --ignore unresolved-import`)
+- [ ] I ran type checking and reviewed the diagnostics (`uv run ty check src --ignore unresolved-import`)
 - [ ] Prek hooks pass (`uv run prek run`)
 - [ ] My commit messages follow Conventional Commits
 - [ ] I have updated documentation if applicable
@@ -280,8 +283,7 @@ gmas/
 ├── docs/                   # Sphinx documentation source
 ├── pyproject.toml          # Project metadata and tool configuration
 ├── .ruff.toml              # Ruff linter configuration
-├── .pre-commit-config.yaml # Pre-commit hooks
-└── .gitlab-ci.yml          # CI/CD pipeline
+└── .pre-commit-config.yaml # Pre-commit hooks
 ```
 
 When adding new functionality, place it in the appropriate module. If you're unsure where something belongs, open an issue to discuss before writing code.

@@ -7,11 +7,13 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from gmas.tools.web_search import (
     BraveProvider,
     DuckDuckGoProvider,
+    SearchError,
     SearchProvider,
     SerperProvider,
     SimpleHTMLParser,
@@ -297,6 +299,10 @@ class TestDuckDuckGoProvider:
         provider = DuckDuckGoProvider(ddgs_backend="lite")
         assert provider._ddgs_backend == "duckduckgo"
 
+    def test_init_auto_ddgs_backend_is_preserved(self):
+        provider = DuckDuckGoProvider(ddgs_backend="auto")
+        assert provider._ddgs_backend == "auto"
+
     def test_search_with_abstract(self):
         provider = DuckDuckGoProvider()
         ddgs_results = [{"title": "Python", "url": "https://python.org", "snippet": "A programming language"}]
@@ -306,6 +312,86 @@ class TestDuckDuckGoProvider:
             assert len(results) == 1
             assert results[0]["title"] == "Python"
             assert results[0]["snippet"] == "A programming language"
+
+    def test_ddgs_engine_falls_back_when_duckduckgo_is_blocked(self):
+        provider = DuckDuckGoProvider()
+
+        class FakeDDGS:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def text(self, query, *, max_results, backend):
+                if backend == "duckduckgo":
+                    from ddgs.exceptions import DDGSException
+
+                    message = "blocked"
+                    raise DDGSException(message)
+                return [{"title": query, "href": "https://example.test", "body": backend}]
+
+        with patch("ddgs.DDGS", FakeDDGS):
+            results = provider._search_ddgs_backend("python", 3, "duckduckgo")
+
+        assert results == [{"title": "python", "url": "https://example.test", "snippet": "brave"}]
+
+    def test_ddgs_auto_backend_is_tried_first(self):
+        provider = DuckDuckGoProvider(ddgs_backend="auto")
+
+        class FakeDDGS:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def text(self, query, *, max_results, backend):
+                return [{"title": query, "href": "https://example.test", "body": backend}]
+
+        with (
+            patch.object(
+                provider,
+                "_get_ddgs_text_backends",
+                return_value=frozenset({"duckduckgo", "brave", "yahoo"}),
+            ),
+            patch("ddgs.DDGS", FakeDDGS),
+        ):
+            results = provider._search_ddgs_backend("python", 3, "auto")
+
+        assert results == [{"title": "python", "url": "https://example.test", "snippet": "auto"}]
+
+    def test_ddgs_engine_returns_empty_after_successful_empty_fallback(self):
+        provider = DuckDuckGoProvider()
+
+        class FakeDDGS:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def text(self, _query, *, max_results: int, backend: str):
+                if backend == "duckduckgo":
+                    from ddgs.exceptions import DDGSException
+
+                    message = "blocked"
+                    raise DDGSException(message)
+                return []
+
+        with patch("ddgs.DDGS", FakeDDGS):
+            results = provider._search_ddgs_backend("no matches", 3, "duckduckgo")
+
+        assert results == []
 
     def test_search_with_related_topics(self):
         provider = DuckDuckGoProvider()
@@ -323,7 +409,7 @@ class TestDuckDuckGoProvider:
 
         provider = DuckDuckGoProvider()
         with (
-            patch.object(provider, "_search_ddgs", side_effect=Exception("failed")),
+            patch.object(provider, "_search_ddgs", side_effect=SearchError("failed")),
             patch.object(provider, "_search_html_httpx", side_effect=ImportError),
             patch("gmas.tools.web_search._providers._urlopen", side_effect=urllib.error.URLError("failed")),
             pytest.raises(SearchError),
@@ -353,6 +439,23 @@ class TestDuckDuckGoProvider:
         ):
             results = provider.search("test", max_results=3)
             assert len(results) <= 3
+
+    def test_search_skips_urllib_html_when_httpx_html_returns_403(self) -> None:
+        """Same DDG HTML endpoint — urllib retry rarely helps after 403; skip for less noise."""
+        provider = DuckDuckGoProvider()
+        resp = MagicMock()
+        resp.status_code = 403
+        exc = httpx.HTTPStatusError("403", request=MagicMock(), response=resp)
+
+        with (
+            patch.object(provider, "_search_ddgs", return_value=[]),
+            patch.object(provider, "_search_html_httpx", side_effect=exc),
+            patch.object(provider, "_search_html_urllib") as urllib_mock,
+            pytest.raises(SearchError),
+        ):
+            provider.search("test query")
+
+        urllib_mock.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -532,6 +635,83 @@ class TestTavilyProvider:
         assert len(results) == 2
         assert results[0]["image_url"] == "https://img.example/one.jpg"
         assert results[0]["url"] == "https://img.example/one.jpg"
+
+    def test_search_images_mixed_dict_and_string_entries(self):
+        provider = TavilyProvider(api_key="key")
+        tavily_response = {
+            "images": [
+                {"url": "https://img.example/a.jpg", "description": "A"},
+                "https://img.example/b.jpg",
+            ]
+        }
+        mock_response = MagicMock()
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_response.read.return_value = json.dumps(tavily_response).encode("utf-8")
+
+        with patch("gmas.tools.web_search._providers._urlopen", return_value=mock_response):
+            results = provider.search_images("cats", max_results=5)
+
+        assert len(results) == 2
+        assert results[0]["image_url"] == "https://img.example/a.jpg"
+        assert results[0]["title"] == "A"
+        assert results[1]["image_url"] == "https://img.example/b.jpg"
+        assert results[1]["url"] == "https://img.example/b.jpg"
+
+    def test_search_images_mixed_string_first(self):
+        provider = TavilyProvider(api_key="key")
+        tavily_response = {
+            "images": [
+                "https://img.example/b.jpg",
+                {"url": "https://img.example/a.jpg", "description": "A"},
+            ]
+        }
+        mock_response = MagicMock()
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_response.read.return_value = json.dumps(tavily_response).encode("utf-8")
+
+        with patch("gmas.tools.web_search._providers._urlopen", return_value=mock_response):
+            results = provider.search_images("cats", max_results=5)
+
+        assert len(results) == 2
+        assert results[0]["image_url"] == "https://img.example/b.jpg"
+        assert results[1]["image_url"] == "https://img.example/a.jpg"
+
+    def test_search_images_skips_malformed_entries_before_limit(self):
+        provider = TavilyProvider(api_key="key")
+        tavily_response = {
+            "images": [
+                None,
+                {"url": ""},
+                {"url": "https://img.example/a.jpg", "description": 42},
+                7,
+                "https://img.example/b.jpg",
+                "https://img.example/c.jpg",
+            ]
+        }
+        mock_response = MagicMock()
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_response.read.return_value = json.dumps(tavily_response).encode("utf-8")
+
+        with patch("gmas.tools.web_search._providers._urlopen", return_value=mock_response):
+            results = provider.search_images("cats", max_results=2)
+
+        assert results == [
+            {
+                "title": "",
+                "url": "https://img.example/a.jpg",
+                "image_url": "https://img.example/a.jpg",
+                "snippet": "",
+            },
+            {
+                "title": "",
+                "url": "https://img.example/b.jpg",
+                "image_url": "https://img.example/b.jpg",
+                "snippet": "",
+            },
+        ]
 
     def test_search_images_empty_without_results_fallback(self):
         provider = TavilyProvider(api_key="key")

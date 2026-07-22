@@ -2,6 +2,8 @@
 
 from typing import TYPE_CHECKING
 
+from gmas.execution.usage import LLMUsage, budget_prompt_completion
+
 from .shared import (
     Any,
     ConditionContext,
@@ -98,7 +100,7 @@ class RunnerBatchMixin:
             MACPResult with execution results.
 
         """
-        if not self._has_any_async_caller():
+        if not self.has_any_async_caller():
             msg = "async_llm_caller, async_llm_callers, or llm_factory is required for async execution"
             raise ValueError(msg)
 
@@ -178,8 +180,6 @@ class RunnerBatchMixin:
             callbacks=callbacks,
         )
 
-        task_connected = self._get_task_connected_agents(role_graph)
-
         messages: dict[str, str] = {}
         total_tokens = 0
         actual_exec_order: list[str] = []
@@ -223,7 +223,7 @@ class RunnerBatchMixin:
                 incoming_ids = get_incoming_agents(agent_id, effective_a, effective_agent_ids)
                 incoming_messages = {aid: messages[aid] for aid in incoming_ids if aid in messages}
 
-                include_query = self._should_include_query(agent_id, task_connected)
+                include_query = self._should_include_query_for_agent(role_graph, agent_id)
                 memory_context = self._get_memory_context(agent_id)
                 prompt = self._build_prompt(
                     agent, query, incoming_messages, agent_names, memory_context, include_query=include_query
@@ -259,7 +259,7 @@ class RunnerBatchMixin:
                         continue
 
                     # Execute LLM caller with tools support
-                    response, agent_tokens = self._run_agent_with_tools(
+                    response, agent_usage = self._run_agent_with_tools(
                         caller=caller,
                         prompt=prompt,
                         agent=agent,
@@ -268,15 +268,16 @@ class RunnerBatchMixin:
                     agent_duration_ms = (time.time() - agent_start_time) * 1000
 
                     messages[agent_id] = response
-                    total_tokens += agent_tokens
+                    total_tokens += agent_usage.total_tokens
                     self._save_to_memory(agent_id, response, incoming_ids)
                     actual_exec_order.append(agent_id)
 
                     if self._budget_tracker:
+                        prompt_tokens, completion_tokens = budget_prompt_completion(agent_usage)
                         self._budget_tracker.record_usage(
                             node_id=agent_id,
-                            prompt_tokens=agent_tokens // 2,
-                            completion_tokens=agent_tokens - agent_tokens // 2,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
                             latency_seconds=agent_duration_ms / 1000,
                         )
 
@@ -289,7 +290,7 @@ class RunnerBatchMixin:
                             output=response,
                             agent_name=agent_names.get(agent_id, agent_id),
                             step_index=step_idx,
-                            tokens_used=agent_tokens,
+                            tokens_used=agent_usage.total_tokens,
                             duration_ms=agent_duration_ms,
                             is_final=is_final,
                         )
@@ -415,7 +416,7 @@ class RunnerBatchMixin:
         Supports multi-model: each agent uses its own LLM caller.
         Supports filtering of isolated nodes to save tokens.
         """
-        if not self._has_any_async_caller():
+        if not self.has_any_async_caller():
             msg = "async_llm_caller, async_llm_callers, or llm_factory is required for async execution"
             raise ValueError(msg)
 
@@ -452,8 +453,6 @@ class RunnerBatchMixin:
             execution_order=exec_order,
             callbacks=callbacks,
         )
-
-        task_connected = self._get_task_connected_agents(role_graph)
 
         messages: dict[str, str] = {}
         total_tokens = 0
@@ -498,7 +497,7 @@ class RunnerBatchMixin:
                 incoming_ids = get_incoming_agents(agent_id, effective_a, effective_agent_ids)
                 incoming_messages = {aid: messages[aid] for aid in incoming_ids if aid in messages}
 
-                include_query = self._should_include_query(agent_id, task_connected)
+                include_query = self._should_include_query_for_agent(role_graph, agent_id)
                 memory_context = self._get_memory_context(agent_id)
                 prompt = self._build_prompt(
                     agent, query, incoming_messages, agent_names, memory_context, include_query=include_query
@@ -537,7 +536,7 @@ class RunnerBatchMixin:
                             )
                         continue
 
-                    response, agent_tokens = await asyncio.wait_for(
+                    response, agent_usage = await asyncio.wait_for(
                         self._run_agent_with_tools_async(
                             async_caller=async_caller,
                             prompt=prompt,
@@ -548,15 +547,16 @@ class RunnerBatchMixin:
                     agent_duration_ms = (time.time() - agent_start_time) * 1000
 
                     messages[agent_id] = response
-                    total_tokens += agent_tokens
+                    total_tokens += agent_usage.total_tokens
                     self._save_to_memory(agent_id, response, incoming_ids)
                     actual_exec_order.append(agent_id)
 
                     if self._budget_tracker:
+                        prompt_tokens, completion_tokens = budget_prompt_completion(agent_usage)
                         self._budget_tracker.record_usage(
                             node_id=agent_id,
-                            prompt_tokens=agent_tokens // 2,
-                            completion_tokens=agent_tokens - agent_tokens // 2,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
                             latency_seconds=agent_duration_ms / 1000,
                         )
 
@@ -569,7 +569,7 @@ class RunnerBatchMixin:
                             output=response,
                             agent_name=agent_names.get(agent_id, agent_id),
                             step_index=step_idx,
-                            tokens_used=agent_tokens,
+                            tokens_used=agent_usage.total_tokens,
                             duration_ms=agent_duration_ms,
                             is_final=is_final,
                         )
@@ -819,13 +819,16 @@ class RunnerBatchMixin:
 
                 # Notify callbacks of agent start
                 agent_name = agent_names.get(step.agent_id, step.agent_id)
+                _step_include_query = self._should_include_query_for_agent(role_graph, step.agent_id)
                 if self._callback_manager:
                     _agent_obj = agent_lookup.get(step.agent_id)
                     _prompt_preview_text = ""
                     if _agent_obj is not None:
                         _inc = {p: messages[p] for p in step.predecessors if p in messages}
                         _mem = self._get_memory_context(step.agent_id)
-                        _sp = self._build_prompt(_agent_obj, query, _inc, agent_names, _mem)
+                        _sp = self._build_prompt(
+                            _agent_obj, query, _inc, agent_names, _mem, include_query=_step_include_query
+                        )
                         _prompt_preview_text = _sp.text
                     self._callback_manager.on_agent_start(
                         run_id=run_id,
@@ -837,7 +840,9 @@ class RunnerBatchMixin:
                     )
 
                 agent_start_time = time.time()
-                result = self._execute_step(step, messages, agent_lookup, agent_names, query)
+                result = self._execute_step(
+                    step, messages, agent_lookup, agent_names, query, include_query=_step_include_query
+                )
 
                 step_results[step.agent_id] = result
                 step_results_by_step[step.step_id] = result
@@ -853,10 +858,17 @@ class RunnerBatchMixin:
                     self._save_to_memory(step.agent_id, response, step.predecessors)
 
                     if self._budget_tracker:
+                        prompt_tokens, completion_tokens = budget_prompt_completion(
+                            LLMUsage(
+                                prompt_tokens=result.prompt_tokens,
+                                completion_tokens=result.completion_tokens,
+                                total_tokens=result.tokens_used,
+                            )
+                        )
                         self._budget_tracker.record_usage(
                             node_id=step.agent_id,
-                            prompt_tokens=result.tokens_used // 2,
-                            completion_tokens=result.tokens_used - result.tokens_used // 2,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
                             latency_seconds=(time.time() - agent_start_time),
                         )
 
@@ -1008,7 +1020,7 @@ class RunnerBatchMixin:
         Per-call ``callbacks`` are merged with ``RunnerConfig.callbacks``
         and context-manager callbacks (similar to ``_arun_simple``).
         """
-        if not self._has_any_async_caller():
+        if not self.has_any_async_caller():
             msg = "async_llm_caller, async_llm_callers, or llm_factory is required for async execution"
             raise ValueError(msg)
         if self._scheduler is None:
@@ -1146,7 +1158,8 @@ class RunnerBatchMixin:
                         if _agent_obj is not None:
                             _inc = {p: messages[p] for p in step.predecessors if p in messages}
                             _mem = self._get_memory_context(step.agent_id)
-                            _sp = self._build_prompt(_agent_obj, query, _inc, agent_names, _mem)
+                            _step_iq = self._should_include_query_for_agent(role_graph, step.agent_id)
+                            _sp = self._build_prompt(_agent_obj, query, _inc, agent_names, _mem, include_query=_step_iq)
                             _prompt_preview_text = _sp.text
                         self._callback_manager.on_agent_start(
                             run_id=run_id,
@@ -1168,11 +1181,20 @@ class RunnerBatchMixin:
                     )
 
                 if _is_parallel_group:
-                    results = await self._execute_parallel(valid_steps, messages, agent_lookup, agent_names, query)
+                    results = await self._execute_parallel(
+                        valid_steps, messages, agent_lookup, agent_names, query, role_graph
+                    )
                 else:
                     results = []
                     for step in valid_steps:
-                        r = await self._execute_step_async(step, messages, agent_lookup, agent_names, query)
+                        r = await self._execute_step_async(
+                            step,
+                            messages,
+                            agent_lookup,
+                            agent_names,
+                            query,
+                            include_query=self._should_include_query_for_agent(role_graph, step.agent_id),
+                        )
                         results.append((step, r))
 
                 for step, result in results:
@@ -1192,10 +1214,17 @@ class RunnerBatchMixin:
                         self._save_to_memory(step.agent_id, response, step.predecessors)
 
                         if self._budget_tracker:
+                            prompt_tokens, completion_tokens = budget_prompt_completion(
+                                LLMUsage(
+                                    prompt_tokens=result.prompt_tokens,
+                                    completion_tokens=result.completion_tokens,
+                                    total_tokens=result.tokens_used,
+                                )
+                            )
                             self._budget_tracker.record_usage(
                                 node_id=step.agent_id,
-                                prompt_tokens=result.tokens_used // 2,
-                                completion_tokens=result.tokens_used - result.tokens_used // 2,
+                                prompt_tokens=prompt_tokens,
+                                completion_tokens=completion_tokens,
                                 latency_seconds=(time.time() - agent_start_time),
                             )
 

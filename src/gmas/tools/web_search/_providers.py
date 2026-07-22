@@ -9,7 +9,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypedDict
+
+from httpx import HTTPError, HTTPStatusError
 
 from gmas.config.logging import logger
 
@@ -19,9 +21,23 @@ _urlopen = urllib.request.urlopen
 _Request = urllib.request.Request
 
 
+def _string_value(value: object) -> str:
+    """Return string payload values and discard unexpected types."""
+    return value if isinstance(value, str) else ""
+
+
 # ============================================================
 # Base & exception
 # ============================================================
+
+
+class ImageSearchResult(TypedDict):
+    """Normalized result returned by every image-search provider."""
+
+    title: str
+    url: str
+    image_url: str
+    snippet: str
 
 
 class SearchProvider(ABC):
@@ -41,7 +57,7 @@ class SearchProvider(ABC):
         """
         ...
 
-    def search_images(self, query: str, max_results: int = 5) -> list[dict[str, str]]:
+    def search_images(self, query: str, max_results: int = 5) -> list[ImageSearchResult]:
         """
         Search for images and return results.
 
@@ -226,6 +242,8 @@ class DuckDuckGoProvider(SearchProvider):
     @classmethod
     def _resolve_ddgs_backend(cls, backend: str) -> str:
         requested = (backend or "duckduckgo").strip().lower()
+        if requested == "auto":
+            return requested
         legacy_aliases = {
             "html": "duckduckgo",
             "lite": "duckduckgo",
@@ -268,19 +286,46 @@ class DuckDuckGoProvider(SearchProvider):
 
     def _search_ddgs_backend(self, query: str, max_results: int, backend: str) -> list[dict[str, str]]:
         from ddgs import DDGS
+        from ddgs.exceptions import DDGSException
 
         resolved_backend = self._resolve_ddgs_backend(backend)
-        results: list[dict[str, str]] = []
-        with DDGS(timeout=self._timeout) as ddgs:
-            results.extend(
-                {
-                    "title": r.get("title", ""),
-                    "url": r.get("href", r.get("link", "")),
-                    "snippet": r.get("body", r.get("snippet", "")),
-                }
-                for r in ddgs.text(query, max_results=max_results, backend=resolved_backend)
+        available = self._get_ddgs_text_backends()
+        candidates = list(
+            dict.fromkeys(
+                candidate
+                for candidate in (resolved_backend, "brave", "yahoo")
+                if candidate == "auto" or not available or candidate in available
             )
-        return results[:max_results]
+        )
+        last_exc: Exception | None = None
+        had_successful_attempt = False
+        for candidate in candidates:
+            try:
+                with DDGS(timeout=self._timeout) as ddgs:
+                    results = [
+                        {
+                            "title": result.get("title", ""),
+                            "url": result.get("href", result.get("link", "")),
+                            "snippet": result.get("body", result.get("snippet", "")),
+                        }
+                        for result in ddgs.text(
+                            query,
+                            max_results=max_results,
+                            backend=candidate,
+                        )
+                    ]
+                had_successful_attempt = True
+                if results:
+                    return results[:max_results]
+            except DDGSException as exc:
+                last_exc = exc
+                logger.debug("DDGS engine={} failed: {}", candidate, exc)
+        if had_successful_attempt:
+            return []
+        if last_exc is not None:
+            message = f"DDGS search failed: {last_exc}"
+            raise SearchError(message) from last_exc
+        return []
 
     @staticmethod
     def _extract_real_url(href: str) -> str:
@@ -364,7 +409,11 @@ class DuckDuckGoProvider(SearchProvider):
             except ImportError as exc:
                 last_exc = exc
                 logger.debug("DuckDuckGo backend={} unavailable: {}", stage, exc)
-            except Exception as exc:  # noqa: BLE001
+            except (HTTPStatusError, urllib.error.HTTPError) as exc:
+                last_exc = exc
+                logger.debug("DuckDuckGo backend={} returned an HTTP error: {}", stage, exc)
+                break
+            except (SearchError, HTTPError, urllib.error.URLError, ValueError, OSError) as exc:
                 last_exc = exc
                 logger.debug("DuckDuckGo backend={} failed: {}", stage, exc)
 
@@ -372,20 +421,21 @@ class DuckDuckGoProvider(SearchProvider):
             raise _classify_urllib_error(last_exc, provider="duckduckgo") from last_exc
         return []
 
-    def search_images(self, query: str, max_results: int = 5) -> list[dict[str, str]]:
+    def search_images(self, query: str, max_results: int = 5) -> list[ImageSearchResult]:
         try:
             from ddgs import DDGS
 
             with DDGS(timeout=self._timeout) as ddgs:
-                return [
+                results: list[ImageSearchResult] = [
                     {
-                        "title": r.get("title", ""),
-                        "url": r.get("url", r.get("source", "")),
-                        "image_url": r.get("image", r.get("thumbnail", "")),
-                        "snippet": r.get("source", ""),
+                        "title": _string_value(item.get("title")),
+                        "url": _string_value(item.get("url", item.get("source"))),
+                        "image_url": _string_value(item.get("image", item.get("thumbnail"))),
+                        "snippet": _string_value(item.get("source")),
                     }
-                    for r in ddgs.images(query, max_results=max_results)
-                ][:max_results]
+                    for item in ddgs.images(query, max_results=max_results)
+                ]
+                return results[:max_results]
         except ImportError:
             pass
         except Exception as exc:
@@ -447,7 +497,7 @@ class SerperProvider(ApiKeySearchProvider):
         except (urllib.error.URLError, ValueError, KeyError, OSError, TimeoutError) as exc:
             raise _classify_urllib_error(exc, provider="serper") from exc
 
-    def search_images(self, query: str, max_results: int = 5) -> list[dict[str, str]]:
+    def search_images(self, query: str, max_results: int = 5) -> list[ImageSearchResult]:
         try:
             data = self._request(self._ENDPOINTS["images"], query, max_results)
             return [
@@ -519,7 +569,26 @@ class TavilyProvider(ApiKeySearchProvider):
         except (urllib.error.URLError, ValueError, KeyError, OSError, TimeoutError) as exc:
             raise _classify_urllib_error(exc, provider="tavily") from exc
 
-    def search_images(self, query: str, max_results: int = 5) -> list[dict[str, str]]:
+    @staticmethod
+    def _normalize_image_item(item: dict[str, object] | str) -> ImageSearchResult | None:
+        if isinstance(item, str) and item:
+            return {"title": "", "url": item, "image_url": item, "snippet": ""}
+        if not isinstance(item, dict):
+            return None
+
+        url = item.get("url")
+        if not isinstance(url, str) or not url:
+            return None
+        description = item.get("description", item.get("title", ""))
+        snippet = item.get("description", "")
+        return {
+            "title": description if isinstance(description, str) else "",
+            "url": url,
+            "image_url": url,
+            "snippet": snippet if isinstance(snippet, str) else "",
+        }
+
+    def search_images(self, query: str, max_results: int = 5) -> list[ImageSearchResult]:
         try:
             data = self._request(
                 query,
@@ -528,26 +597,21 @@ class TavilyProvider(ApiKeySearchProvider):
                 include_images=True,
                 include_image_descriptions=True,
             )
-            images = data.get("images") or []
-            if not (isinstance(images, list) and images):
-                return []
-            if isinstance(images[0], dict):
-                return [
-                    {
-                        "title": item.get("description", item.get("title", "")),
-                        "url": item.get("url", ""),
-                        "image_url": item.get("url", ""),
-                        "snippet": item.get("description", ""),
-                    }
-                    for item in images[:max_results]
-                ]
-            return [
-                {"title": "", "url": url, "image_url": url, "snippet": ""}
-                for url in images[:max_results]
-                if isinstance(url, str)
-            ]
         except (urllib.error.URLError, ValueError, KeyError, OSError, TimeoutError) as exc:
             raise _classify_urllib_error(exc, provider="tavily") from exc
+
+        images = data.get("images") or []
+        if not isinstance(images, list):
+            return []
+
+        results: list[ImageSearchResult] = []
+        for item in images:
+            if len(results) >= max_results:
+                break
+            normalized = self._normalize_image_item(item)
+            if normalized is not None:
+                results.append(normalized)
+        return results
 
 
 class BraveProvider(ApiKeySearchProvider):
@@ -583,13 +647,13 @@ class BraveProvider(ApiKeySearchProvider):
         except (urllib.error.URLError, ValueError, KeyError, OSError, TimeoutError) as exc:
             raise _classify_urllib_error(exc, provider="brave") from exc
 
-    def search_images(self, query: str, max_results: int = 5) -> list[dict[str, str]]:
+    def search_images(self, query: str, max_results: int = 5) -> list[ImageSearchResult]:
         try:
             data = self._request(self._ENDPOINTS["images"], query, max_results)
         except (urllib.error.URLError, ValueError, KeyError, OSError, TimeoutError) as exc:
             raise _classify_urllib_error(exc, provider="brave") from exc
         else:
-            results: list[dict[str, str]] = []
+            results: list[ImageSearchResult] = []
             for item in data.get("results", [])[:max_results]:
                 properties = item.get("properties") or {}
                 thumbnail = item.get("thumbnail") or {}
@@ -659,7 +723,7 @@ class SearXNGProvider(SearchProvider):
             return resp.json()
         except ImportError:
             pass
-        except Exception as exc:  # noqa: BLE001
+        except (HTTPError, ValueError) as exc:
             last_exc = exc
             logger.debug("SearXNG httpx request failed: {}", exc)
 
@@ -682,7 +746,7 @@ class SearXNGProvider(SearchProvider):
             for item in data.get("results", [])[:max_results]
         ]
 
-    def search_images(self, query: str, max_results: int = 5) -> list[dict[str, str]]:
+    def search_images(self, query: str, max_results: int = 5) -> list[ImageSearchResult]:
         data = self._fetch_json(query, categories="images")
         return [
             {
@@ -813,7 +877,7 @@ class GoogleProvider(SearchProvider):
         except (urllib.error.URLError, ValueError, KeyError, OSError, TimeoutError) as exc:
             raise _classify_urllib_error(exc, provider="google") from exc
 
-    def search_images(self, query: str, max_results: int = 5) -> list[dict[str, str]]:
+    def search_images(self, query: str, max_results: int = 5) -> list[ImageSearchResult]:
         try:
             data = self._request(query, max_results, searchType="image")
             return [

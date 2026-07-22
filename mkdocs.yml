@@ -1,39 +1,54 @@
 site_name: gMAS Documentation
 site_description: A modern graph-based framework for multi-agent systems
 site_author: Frontier AI
+site_url: https://frontier-ai-next.github.io/gMAS/
 copyright: Copyright &copy; 2026 Frontier AI
 
-repo_url: https://github.com/frontier-ai-next/gmas
-repo_name: frontier-ai-next/gmas
+repo_url: https://github.com/frontier-ai-next/gMAS
+repo_name: frontier-ai-next/gMAS
+edit_uri: edit/main/docs/
 
 theme:
   name: material
+  language: en
+  font: false
+  icon:
+    logo: material/graph-outline
+    repo: fontawesome/brands/github
   palette:
-    - scheme: default
-      primary: indigo
-      accent: indigo
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Use light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-7
-        name: Switch to dark mode
-    - scheme: slate
-      primary: indigo
-      accent: indigo
+        name: Use dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-4
-        name: Switch to light mode
+        name: Follow system preference
   features:
     - navigation.instant
+    - navigation.instant.progress
     - navigation.tracking
     - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
-    - navigation.expand
+    - navigation.path
     - navigation.top
+    - navigation.footer
     - search.suggest
     - search.highlight
     - content.code.copy
+    - content.action.edit
     - content.tabs.link
-  icon:
-    repo: fontawesome/brands/github
 
 plugins:
   - search
@@ -67,6 +82,15 @@ markdown_extensions:
   - toc:
       permalink: true
 
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/frontier-ai-next/gMAS
+      name: gMAS on GitHub
+
 nav:
   - Home: index.md
   - Getting Started:
@@ -98,12 +122,22 @@ nav:
       - Builder: api/builder.md
       - Tools: api/tools.md
       - Config: api/config.md
+  - Design:
+      - gMAS and LangGraph: comparisons/langgraph.md
   - Examples:
       - Basic Usage: examples/basic-usage.md
       - Streaming: examples/streaming.md
       - GNN Routing: examples/gnn-routing.md
+  - Benchmarks:
+      - Overview: benchmarks/index.md
+      - Matched Topology: benchmarks/topology.md
+      - Runtime Ablations: benchmarks/ablations.md
+      - GAIA: benchmarks/gaia.md
+      - AgentPrune: benchmarks/agentprune.md
+      - Reproducibility: benchmarks/reproducibility.md
   - Contributing:
       - Overview: contributing/index.md
       - Development Workflow: contributing/workflow.md
       - Code Style: contributing/code-style.md
       - Testing: contributing/testing.md
+      - Releasing: contributing/releasing.md

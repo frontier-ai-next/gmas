@@ -16,7 +16,7 @@ the comparison is apples-to-apples.
 
 Usage::
 
-    python benchmarks/benchmark_web_tool.py \\
+    python -m benchmarks.exploratory.web_tool \\
         --datasets gaia,swe-bench-pro \\
         --tool-configs simple,deep_search \\
         --max-samples 20 \\
@@ -76,8 +76,6 @@ from gmas.tools import (
 from gmas.tools.llm_integration import LLMResponse
 
 try:
-    from typing import TypedDict
-
     from langgraph.graph import StateGraph
 
     LANGGRAPH_AVAILABLE = True
@@ -264,7 +262,9 @@ def _load_local_env(path: Path) -> None:
 
 
 def _validate_llm_config(cfg: BenchmarkConfig) -> tuple[str, str, str]:
-    _load_local_env(Path(__file__).resolve().parents[1] / ".env")
+    root = Path(__file__).resolve().parents[2]
+    _load_local_env(root / ".env")
+    _load_local_env(root / "benchmarks" / ".env")
     _load_local_env(Path(__file__).resolve().parent / ".env")
     api_key = os.getenv(cfg.env_api_key, cfg.env_defaults.get(cfg.env_api_key, ""))
     base_url = os.getenv(cfg.env_base_url, cfg.env_defaults.get(cfg.env_base_url, ""))
@@ -738,7 +738,8 @@ def _run_langgraph_single(
     if not LANGGRAPH_AVAILABLE:
         return {"framework": "langgraph", "error": "langgraph not installed"}
 
-    class State(TypedDict):
+    @dataclass
+    class State:
         input: str
         output: str
 
@@ -748,7 +749,7 @@ def _run_langgraph_single(
     def researcher_node(state: State) -> dict[str, str]:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": _AGENT_SYSTEM_PROMPT},
-            {"role": "user", "content": state["input"]},
+            {"role": "user", "content": state.input},
         ]
         output = _run_tool_loop(
             tracked,
@@ -763,10 +764,10 @@ def _run_langgraph_single(
     tracked.reset()
     t0 = time.perf_counter()
     g = StateGraph(State)
-    g.add_node("researcher", researcher_node)
+    g.add_node("researcher", researcher_node, input_schema=State)
     g.set_entry_point("researcher")
     g.set_finish_point("researcher")
-    result = g.compile().invoke({"input": problem, "output": ""})
+    result = g.compile().invoke(State(input=problem, output=""))
     elapsed = time.perf_counter() - t0
     output = result["output"]
 

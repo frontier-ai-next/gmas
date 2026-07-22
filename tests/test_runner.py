@@ -12,7 +12,7 @@ from gmas.execution.budget import BudgetConfig
 from gmas.execution.runner import MACPResult, MACPRunner, RunnerConfig
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from gmas.execution.runner.llm import LLMCallerProtocol
 
 
 def create_test_graph(nodes, edges):
@@ -614,7 +614,7 @@ class TestConditionalEdgesAdaptive:
         )
 
         # Different callers for different agents
-        llm_callers: dict[str, Callable[[str], str]] = {
+        llm_callers: dict[str, LLMCallerProtocol] = {
             "a": lambda _: "fail result",
             "c": lambda _: "good result",
             "b": lambda _: "final response",
@@ -671,7 +671,7 @@ class TestConditionalEdgesAdaptive:
             ("solver", "reviewer"): lambda ctx: "correct" in ctx.messages.get("solver", ""),
         }
 
-        callers1: dict[str, Callable[[str], str]] = {
+        callers1: dict[str, LLMCallerProtocol] = {
             "solver": lambda _: "answer is correct",
             "reviewer": lambda _: "review passed",
             "finalize": lambda _: "done",
@@ -706,7 +706,7 @@ class TestConditionalEdgesAdaptive:
             ("solver", "reviewer"): lambda ctx: "correct" in ctx.messages.get("solver", ""),
         }
 
-        callers2: dict[str, Callable[[str], str]] = {
+        callers2: dict[str, LLMCallerProtocol] = {
             "solver": lambda _: "answer is wrong",
             "reviewer": lambda _: "review passed",
             "finalize": lambda _: "done",

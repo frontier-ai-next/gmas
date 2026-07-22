@@ -62,13 +62,20 @@ def _load_env_file(path: Path) -> None:
                 os.environ[key] = value.strip().strip('"').strip("'")
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_load_env_file(_REPO_ROOT / ".env")
+_load_env_file(_REPO_ROOT / "benchmarks" / ".env")
 _load_env_file(Path(__file__).resolve().parent / ".env")
-_load_env_file(Path(__file__).resolve().parents[1] / ".env")
 
 
 def _env(name: str, default: str = "") -> str:
-    """Read ``BENCH_<name>`` from the environment."""
-    return os.environ.get(f"BENCH_{name}", default)
+    """Read a benchmark override, falling back to the shared LLM endpoint."""
+    value = os.environ.get(f"BENCH_{name}")
+    if value:
+        return value
+    if name in {"API_KEY", "BASE_URL", "MODEL"}:
+        return os.environ.get(f"LLM_{name}", default)
+    return default
 
 
 def _env_int(name: str, default: int) -> int:
@@ -471,7 +478,7 @@ def _attach_embeddings(graph: Any) -> Any:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Accuracy scoring (aligned with benchmark_vs_langgraph.py evaluation)
+# Accuracy scoring (aligned with benchmarks.topology.run evaluation)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -1535,7 +1542,7 @@ def _save_all(
     samples: list[BBHSample],
 ) -> None:
     now = datetime.now(UTC)
-    log_dir = Path(__file__).resolve().parent.parent / "benchmark_logs" / "gmas_vs_gmas"
+    log_dir = _REPO_ROOT / "benchmark_logs" / "ablations"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     _save_json(log_dir, now, all_results, samples)

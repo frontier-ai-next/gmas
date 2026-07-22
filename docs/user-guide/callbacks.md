@@ -26,7 +26,7 @@ class MyHandler(BaseCallbackHandler):
         print(f"Tool {tool_name} returned: {output[:100]}")
 ```
 
-## Full Lifecycle Hooks
+## Lifecycle hooks
 
 `BaseCallbackHandler` provides no-op methods for all events. Override only what you need:
 

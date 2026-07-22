@@ -3,8 +3,12 @@
 from typing import TYPE_CHECKING
 
 import pytest
+import rustworkx as rx
 import torch
 
+import gmas.execution.scheduler as scheduler_module
+from gmas.core.graph import RoleGraph
+from gmas.execution.runner import MACPRunner
 from gmas.execution.scheduler import (
     AdaptiveScheduler,
     ConditionContext,
@@ -14,6 +18,7 @@ from gmas.execution.scheduler import (
     PruningConfig,
     RoutingPolicy,
     StepResult,
+    agentprune,
     build_execution_order,
     extract_agent_adjacency,
     filter_reachable_agents,
@@ -339,6 +344,96 @@ class TestExtractAgentAdjacency:
         a = make_adj(3, [(0, 1), (1, 2)])
         result = extract_agent_adjacency(a, task_idx=1)
         assert result.shape == (2, 2)
+
+
+class TestAgentPrune:
+    @pytest.mark.parametrize(
+        ("queries", "answers", "kwargs", "message"),
+        [
+            ([], None, {}, "at least one training query"),
+            (["q"], [], {}, "Answers don't match queries size"),
+            (["q"], None, {"prune_ratio": -0.1}, "prune_ratio"),
+            (["q"], None, {"prune_ratio": 1.1}, "prune_ratio"),
+            (["q"], None, {"mc_num_iterations": 0}, "mc_num_iterations"),
+            (["q"], None, {"rl_num_iterations": 0}, "rl_num_iterations"),
+            (["q"], None, {"lr": 0.0}, "lr"),
+        ],
+    )
+    async def test_rejects_invalid_configuration(self, queries, answers, kwargs, message):
+        with pytest.raises(ValueError, match=message):
+            await agentprune(RoleGraph(), MACPRunner(), queries, lambda *_: 0.0, answers, **kwargs)
+
+    async def test_monte_carlo_samples_use_independent_graphs(self, monkeypatch):
+        graph_data = rx.PyDiGraph()
+        graph_data.add_node({"id": "a"})
+        graph_data.add_node({"id": "b"})
+        graph_data.add_edge(0, 1, {"weight": 1.0})
+        graph_data.add_edge(1, 0, {"weight": 1.0})
+        adjacency = torch.tensor([[0.0, 1.0], [1.0, 0.0]])
+        graph = RoleGraph(
+            node_ids=["a", "b"],
+            role_connections={"a": ["b"], "b": ["a"]},
+            graph=graph_data,
+            A_com=adjacency,
+        )
+        sampled_graphs = []
+
+        async def record_sample(sampled_graph, *_args, **_kwargs):
+            sampled_graphs.append(sampled_graph)
+            return 1.0
+
+        samples = iter([torch.zeros_like(adjacency), adjacency.clone()])
+        monkeypatch.setattr(scheduler_module, "_agentprune_reward_for_all_queries", record_sample)
+        monkeypatch.setattr(torch, "bernoulli", lambda _probs: next(samples))
+
+        await agentprune(
+            graph,
+            MACPRunner(),
+            ["q"],
+            lambda *_: 0.0,
+            mc_num_iterations=2,
+            rl_num_iterations=1,
+        )
+
+        assert len(sampled_graphs) == 2
+        assert sampled_graphs[0] is not sampled_graphs[1]
+        assert sampled_graphs[0].num_edges == 0
+        assert sampled_graphs[1].num_edges == 2
+        assert graph.num_edges == 2
+
+    async def test_task_position_follows_adjacency_order(self, monkeypatch):
+        graph_data = rx.PyDiGraph()
+        for node_id in ["__task__", "a", "b"]:
+            graph_data.add_node({"id": node_id})
+        adjacency = torch.tensor(
+            [
+                [0.0, 0.2, 0.9],
+                [0.3, 0.0, 0.4],
+                [0.7, 0.6, 0.0],
+            ]
+        )
+        graph = RoleGraph(
+            node_ids=["a", "__task__", "b"],
+            task_node="__task__",
+            graph=graph_data,
+            A_com=adjacency,
+        )
+        observed_probabilities = []
+
+        async def constant_reward(*_args, **_kwargs):
+            return 1.0
+
+        def record_probabilities(probabilities):
+            observed_probabilities.append(probabilities.detach().clone())
+            return torch.zeros_like(probabilities)
+
+        monkeypatch.setattr(scheduler_module, "_agentprune_reward_for_all_queries", constant_reward)
+        monkeypatch.setattr(torch, "bernoulli", record_probabilities)
+
+        await agentprune(graph, MACPRunner(), ["q"], lambda *_: 0.0, rl_num_iterations=1, mc_num_iterations=1)
+
+        expected_agent_adjacency = torch.tensor([[0.0, 0.9], [0.7, 0.0]])
+        torch.testing.assert_close(observed_probabilities[0], 0.5 * expected_agent_adjacency.square())
 
 
 class TestGetIncomingOutgoingAgents:

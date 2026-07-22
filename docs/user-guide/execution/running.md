@@ -87,6 +87,22 @@ runner = MACPRunner(llm_caller=llm_caller, config=config)
 result = runner.run_round(graph)
 ```
 
+## Selective Task Broadcast
+
+By default, every agent receives the task query. Set `broadcast_task_to_all=False`
+to include it only in prompts for agents with a direct outgoing edge from the task
+node. The runner reads the live graph before each prompt, so dynamic edge changes
+affect subsequent agents immediately.
+
+```python
+config = RunnerConfig(broadcast_task_to_all=False)
+runner = MACPRunner(llm_caller=llm_caller, config=config)
+result = runner.run_round(graph)
+```
+
+Agents without a direct task edge still receive messages from their graph
+predecessors.
+
 ## Specifying Start/End Agents
 
 By default, the runner infers start and end agents from the graph topology. You can override:

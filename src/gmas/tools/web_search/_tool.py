@@ -16,7 +16,7 @@ from ..base import BaseTool, ToolResult
 from ._cache import SearchCache
 from ._fetchers import BrowserFetcher, PlaywrightFetcher, SeleniumFetcher, URLFetcher
 from ._policy import WebSearchPolicy
-from ._providers import DuckDuckGoProvider, SearchError, SearchProvider
+from ._providers import DuckDuckGoProvider, ImageSearchResult, SearchError, SearchProvider
 from ._router import SearchRouter
 from ._utils import deduplicate_results
 
@@ -1830,7 +1830,7 @@ class WebSearchTool(BaseTool):
 
         self._apply_fetched_content(results, candidates, combined_fetch_map)
 
-    def _format_image_results(self, results: list[dict[str, str]]) -> str:
+    def _format_image_results(self, results: list[ImageSearchResult]) -> str:
         if not results:
             return "No image results found for the query."
 

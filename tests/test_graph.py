@@ -462,6 +462,74 @@ class TestEdgeOperations:
         assert ab_edge[0]["weight"] == 0.9
 
 
+class TestUpdateAgentAdjacency:
+    def test_replaces_agent_edges_and_preserves_task_edges(self):
+        g = rx.PyDiGraph()
+        for node_id in ["a", "__task__", "b"]:
+            g.add_node({"id": node_id})
+        g.add_edge(0, 2, {"weight": 1.0, "schema": {"weight": 1.0}})
+        g.add_edge(1, 0, {"weight": 1.0, "kind": "task"})
+
+        graph = RoleGraph(
+            node_ids=["a", "__task__", "b"],
+            role_connections={"a": ["b"], "__task__": ["a"], "b": []},
+            task_node="__task__",
+            graph=g,
+            A_com=torch.tensor(
+                [
+                    [0.0, 0.0, 1.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                ]
+            ),
+        )
+
+        graph.update_agent_adjacency(torch.tensor([[0.0, 0.4], [0.8, 0.0]]))
+
+        torch.testing.assert_close(
+            graph.A_com,
+            torch.tensor([[0.0, 0.0, 0.4], [1.0, 0.0, 0.0], [0.8, 0.0, 0.0]]),
+        )
+        assert {(edge["source"], edge["target"]) for edge in graph.edges} == {
+            ("__task__", "a"),
+            ("b", "a"),
+        }
+        assert graph.role_connections == {"a": [], "__task__": ["a"], "b": ["a"]}
+
+    def test_preserves_existing_edge_metadata(self):
+        g = rx.PyDiGraph()
+        g.add_node({"id": "a"})
+        g.add_node({"id": "b"})
+        g.add_edge(
+            0,
+            1,
+            {
+                "weight": 1.0,
+                "attr": torch.tensor([1.0, 2.0]),
+                "schema": {"weight": 1.0, "label": "kept"},
+            },
+        )
+        graph = RoleGraph(
+            node_ids=["a", "b"],
+            role_connections={"a": ["b"], "b": []},
+            graph=g,
+            A_com=torch.tensor([[0.0, 1.0], [0.0, 0.0]]),
+        )
+
+        graph.update_agent_adjacency(torch.tensor([[0.0, 0.75], [0.0, 0.0]]))
+
+        edge = graph.edges[0]
+        assert edge["weight"] == pytest.approx(0.75)
+        assert edge["attr"] == pytest.approx([0.75, 2.0])
+        assert edge["schema"] == {"weight": pytest.approx(0.75), "label": "kept"}
+
+    def test_rejects_wrong_shape(self):
+        graph = RoleGraph(node_ids=["a", "b"], A_com=torch.zeros((2, 2)))
+
+        with pytest.raises(ValueError, match="agent adjacency shape"):
+            graph.update_agent_adjacency(torch.zeros((3, 3)))
+
+
 class TestPyGExport:
     def test_edge_index_empty(self):
         graph = RoleGraph()

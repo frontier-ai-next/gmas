@@ -4,6 +4,13 @@ import time as _time
 from typing import TYPE_CHECKING
 
 from gmas.config.logging import logger
+from gmas.execution.usage import (
+    LLMUsage,
+    count_llm_call,
+    is_llm_response,
+    response_text,
+    unwrap_llm_text,
+)
 
 from .shared import (
     TOOLS_AVAILABLE,
@@ -27,13 +34,24 @@ if TYPE_CHECKING:
     from . import MACPRunner
 
 
+def _prompt_text_for_usage(
+    *,
+    use_structured_tools: bool,
+    tool_messages: list[dict[str, str]],
+    current_prompt: str,
+) -> str:
+    if use_structured_tools:
+        return " ".join(message.get("content") or "" for message in tool_messages)
+    return current_prompt
+
+
 class RunnerExecutionMixin:
     def _run_agent_with_tools(  # noqa: PLR0912, PLR0915
         self: "MACPRunner",
         caller: Any,
         prompt: str | StructuredPrompt,
         agent: Any,
-    ) -> tuple[str, int]:
+    ) -> tuple[str, LLMUsage]:
         """
         Execute an agent with automatic tools support.
 
@@ -58,7 +76,7 @@ class RunnerExecutionMixin:
             agent: Agent profile (AgentProfile with tools)
 
         Returns:
-            tuple[str, int]: (response, number of tokens)
+            tuple[str, LLMUsage]: (response, provider-aligned token usage)
 
         """
         import inspect
@@ -66,10 +84,14 @@ class RunnerExecutionMixin:
         # Normalise prompt — always have both flat text and structured form
         prompt_text = prompt.text if isinstance(prompt, StructuredPrompt) else prompt
 
+        def _plain_result(raw: Any) -> tuple[str, LLMUsage]:
+            _, usage = count_llm_call(self.token_counter, raw, prompt_text=prompt_text)
+            return unwrap_llm_text(raw), usage
+
         # Check if the agent has tools
         if not TOOLS_AVAILABLE:
-            response = self._call_llm(caller, prompt) if isinstance(prompt, StructuredPrompt) else caller(prompt)
-            return response, self.token_counter(prompt_text) + self.token_counter(response)
+            raw = self._call_llm(caller, prompt) if isinstance(prompt, StructuredPrompt) else caller(prompt)
+            return _plain_result(raw)
 
         # Get agent tools (method from AgentProfile)
         agent_tools = []
@@ -86,8 +108,8 @@ class RunnerExecutionMixin:
 
         if not agent_tools:
             # Agent has no tools — plain call (use structured dispatch)
-            response = self._call_llm(caller, prompt) if isinstance(prompt, StructuredPrompt) else caller(prompt)
-            return response, self.token_counter(prompt_text) + self.token_counter(response)
+            raw = self._call_llm(caller, prompt) if isinstance(prompt, StructuredPrompt) else caller(prompt)
+            return _plain_result(raw)
 
         # Check that caller supports tools
         sig = inspect.signature(caller)
@@ -95,14 +117,14 @@ class RunnerExecutionMixin:
 
         if not supports_tools:
             # Caller does not support tools — plain call
-            response = self._call_llm(caller, prompt) if isinstance(prompt, StructuredPrompt) else caller(prompt)
-            return response, self.token_counter(prompt_text) + self.token_counter(response)
+            raw = self._call_llm(caller, prompt) if isinstance(prompt, StructuredPrompt) else caller(prompt)
+            return _plain_result(raw)
 
         # Get schemas for tools
         tool_schemas = [t.to_openai_schema() for t in agent_tools]
         if not tool_schemas:
-            response = self._call_llm(caller, prompt) if isinstance(prompt, StructuredPrompt) else caller(prompt)
-            return response, self.token_counter(prompt_text) + self.token_counter(response)
+            raw = self._call_llm(caller, prompt) if isinstance(prompt, StructuredPrompt) else caller(prompt)
+            return _plain_result(raw)
 
         # Get registry for executing tools
         from gmas.tools import ToolCall, get_registry
@@ -113,7 +135,7 @@ class RunnerExecutionMixin:
             if not registry.has(t.name):
                 registry.register(t)
 
-        total_tokens = 0
+        accumulated_usage = LLMUsage()
 
         if isinstance(prompt, StructuredPrompt):
             tool_messages: list[dict[str, str]] = list(prompt.messages)
@@ -139,39 +161,40 @@ class RunnerExecutionMixin:
             is_last_iteration = iteration == self.config.max_tool_iterations - 1
 
             if use_structured_tools:
-                llm_response = caller(tool_messages, tools=tool_schemas)
+                raw_response = caller(tool_messages, tools=tool_schemas)
             else:
-                llm_response = caller(current_prompt, tools=tool_schemas)
+                raw_response = caller(current_prompt, tools=tool_schemas)
 
-            if isinstance(llm_response, str):
-                # Caller returned a string, not an LLMResponse
-                return llm_response, total_tokens + self.token_counter(llm_response)
+            prompt_for_count = _prompt_text_for_usage(
+                use_structured_tools=use_structured_tools,
+                tool_messages=tool_messages,
+                current_prompt=current_prompt,
+            )
+            llm_payload, call_usage = count_llm_call(
+                self.token_counter,
+                raw_response,
+                prompt_text=prompt_for_count,
+            )
+            accumulated_usage.add(call_usage)
 
-            # Token counting: use the actual prompt content sent to the LLM
-            if use_structured_tools:
-                prompt_tokens = sum(self.token_counter(m.get("content") or "") for m in tool_messages)
-            else:
-                prompt_tokens = self.token_counter(current_prompt)
-            total_tokens += prompt_tokens
-            if llm_response.content:
-                total_tokens += self.token_counter(llm_response.content)
+            if isinstance(llm_payload, str):
+                return llm_payload, accumulated_usage
+
+            llm_response = llm_payload
+            if not is_llm_response(llm_response):
+                return response_text(llm_response), accumulated_usage
 
             if not llm_response.has_tool_calls:
                 content = llm_response.content or ""
                 if content:
                     logger.debug("No tool calls, returning content: {}...", content[:50])
-                    return content, total_tokens
+                    return content, accumulated_usage
                 logger.debug("No tool calls and empty content — breaking to post-loop fallback")
                 break
 
-            # On the last iteration, if the LLM returned content alongside
-            # tool_calls, return the content immediately.  Otherwise fall
-            # through to execute the tool calls and then force a final
-            # answer — this prevents returning an empty string when the
-            # model stubbornly issues tool_calls on the last turn.
             if is_last_iteration and llm_response.content:
                 logger.debug("Last iteration with content, returning: {}...", llm_response.content[:50])
-                return llm_response.content, total_tokens
+                return llm_response.content, accumulated_usage
 
             # Execute tool_calls with caching
             tool_results: list[str] = []
@@ -299,7 +322,7 @@ class RunnerExecutionMixin:
         # ------------------------------------------------------------------
         last_content = llm_response.content if llm_response else ""
         if last_content:
-            return last_content, total_tokens
+            return last_content, accumulated_usage
 
         _caller_max_tokens = getattr(caller, "max_tokens", 0) or 0
         _ctx_budget = _caller_max_tokens * 3 if _caller_max_tokens else 0
@@ -308,30 +331,38 @@ class RunnerExecutionMixin:
                 clean_messages = _strip_tool_metadata(tool_messages, max_total_chars=_ctx_budget)
                 clean_messages.append({"role": "user", "content": "Now provide your final answer."})
                 final_resp = caller(clean_messages, tools=None)
+                final_prompt = _prompt_text_for_usage(
+                    use_structured_tools=True,
+                    tool_messages=clean_messages,
+                    current_prompt=current_prompt,
+                )
             else:
                 final_resp = caller(current_prompt, tools=None)
+                final_prompt = current_prompt
 
-            if isinstance(final_resp, str):
-                if final_resp:
-                    return final_resp, total_tokens + self.token_counter(final_resp)
-            else:
-                final_content = getattr(final_resp, "content", "") or ""
-                if final_content:
-                    return final_content, total_tokens + self.token_counter(final_content)
+            final_payload, final_usage = count_llm_call(
+                self.token_counter,
+                final_resp,
+                prompt_text=final_prompt,
+            )
+            accumulated_usage.add(final_usage)
+            final_text = response_text(final_payload)
+            if final_text:
+                return final_text, accumulated_usage
         except Exception as exc:  # noqa: BLE001
             logger.warning("Final summary call failed: {}", exc)
 
         for msg in reversed(tool_messages if use_structured_tools else []):
             if msg.get("role") == "assistant" and msg.get("content"):
-                return msg["content"], total_tokens
-        return last_content, total_tokens
+                return msg["content"], accumulated_usage
+        return last_content, accumulated_usage
 
     async def _run_agent_with_tools_async(  # noqa: PLR0912, PLR0915
         self: "MACPRunner",
         async_caller: Any,
         prompt: str | StructuredPrompt,
         agent: Any,
-    ) -> tuple[str, int]:
+    ) -> tuple[str, LLMUsage]:
         """
         Async version of :meth:`_run_agent_with_tools`.
 
@@ -346,13 +377,17 @@ class RunnerExecutionMixin:
 
         prompt_text = prompt.text if isinstance(prompt, StructuredPrompt) else prompt
 
+        async def _plain_result(raw: Any) -> tuple[str, LLMUsage]:
+            _, usage = count_llm_call(self.token_counter, raw, prompt_text=prompt_text)
+            return unwrap_llm_text(raw), usage
+
         if not TOOLS_AVAILABLE:
-            response = (
+            raw = (
                 await self._acall_llm(async_caller, prompt)
                 if isinstance(prompt, StructuredPrompt)
                 else await async_caller(prompt)
             )
-            return response, self.token_counter(prompt_text) + self.token_counter(response)
+            return await _plain_result(raw)
 
         agent_tools = []
         if hasattr(agent, "get_tool_objects"):
@@ -367,32 +402,32 @@ class RunnerExecutionMixin:
                 agent_tools = registry.get_tools(tool_names)
 
         if not agent_tools:
-            response = (
+            raw = (
                 await self._acall_llm(async_caller, prompt)
                 if isinstance(prompt, StructuredPrompt)
                 else await async_caller(prompt)
             )
-            return response, self.token_counter(prompt_text) + self.token_counter(response)
+            return await _plain_result(raw)
 
         sig = inspect.signature(async_caller) if async_caller is not None else None
         supports_tools = sig is not None and "tools" in sig.parameters
 
         if not supports_tools:
-            response = (
+            raw = (
                 await self._acall_llm(async_caller, prompt)
                 if isinstance(prompt, StructuredPrompt)
                 else await async_caller(prompt)
             )
-            return response, self.token_counter(prompt_text) + self.token_counter(response)
+            return await _plain_result(raw)
 
         tool_schemas = [t.to_openai_schema() for t in agent_tools]
         if not tool_schemas:
-            response = (
+            raw = (
                 await self._acall_llm(async_caller, prompt)
                 if isinstance(prompt, StructuredPrompt)
                 else await async_caller(prompt)
             )
-            return response, self.token_counter(prompt_text) + self.token_counter(response)
+            return await _plain_result(raw)
 
         from gmas.tools import ToolCall, get_registry
 
@@ -402,7 +437,7 @@ class RunnerExecutionMixin:
             if not registry.has(t.name):
                 registry.register(t)
 
-        total_tokens = 0
+        accumulated_usage = LLMUsage()
 
         if isinstance(prompt, StructuredPrompt):
             tool_messages: list[dict[str, str]] = list(prompt.messages)
@@ -426,34 +461,40 @@ class RunnerExecutionMixin:
             is_last_iteration = iteration == self.config.max_tool_iterations - 1
 
             if use_structured_tools:
-                llm_response = await async_caller(tool_messages, tools=tool_schemas)
+                raw_response = await async_caller(tool_messages, tools=tool_schemas)
             else:
-                llm_response = await async_caller(current_prompt, tools=tool_schemas)
+                raw_response = await async_caller(current_prompt, tools=tool_schemas)
 
-            if isinstance(llm_response, str):
-                return llm_response, total_tokens + self.token_counter(llm_response)
+            prompt_for_count = _prompt_text_for_usage(
+                use_structured_tools=use_structured_tools,
+                tool_messages=tool_messages,
+                current_prompt=current_prompt,
+            )
+            llm_payload, call_usage = count_llm_call(
+                self.token_counter,
+                raw_response,
+                prompt_text=prompt_for_count,
+            )
+            accumulated_usage.add(call_usage)
 
-            if use_structured_tools:
-                prompt_tokens = sum(self.token_counter(m.get("content") or "") for m in tool_messages)
-            else:
-                prompt_tokens = self.token_counter(current_prompt)
-            total_tokens += prompt_tokens
-            if llm_response.content:
-                total_tokens += self.token_counter(llm_response.content)
+            if isinstance(llm_payload, str):
+                return llm_payload, accumulated_usage
+
+            llm_response = llm_payload
+            if not is_llm_response(llm_response):
+                return response_text(llm_response), accumulated_usage
 
             if not llm_response.has_tool_calls:
                 content = llm_response.content or ""
                 if content:
                     logger.debug("No tool calls (async), returning content: {}...", content[:50])
-                    return content, total_tokens
+                    return content, accumulated_usage
                 logger.debug("No tool calls and empty content (async) — breaking to post-loop fallback")
                 break
 
-            # On the last iteration, if the LLM returned content alongside
-            # tool_calls, return the content immediately.
             if is_last_iteration and llm_response.content:
                 logger.debug("Last iteration (async) with content, returning: {}...", llm_response.content[:50])
-                return llm_response.content, total_tokens
+                return llm_response.content, accumulated_usage
 
             tool_results: list[str] = []
             all_cached = True
@@ -572,7 +613,7 @@ class RunnerExecutionMixin:
         # ------------------------------------------------------------------
         last_content = llm_response.content if llm_response else ""
         if last_content:
-            return last_content, total_tokens
+            return last_content, accumulated_usage
 
         logger.debug("Forcing final answer call without tool schemas (async)")
         _caller_max_tokens = getattr(async_caller, "max_tokens", 0) or 0
@@ -582,23 +623,31 @@ class RunnerExecutionMixin:
                 clean_messages = _strip_tool_metadata(tool_messages, max_total_chars=_ctx_budget)
                 clean_messages.append({"role": "user", "content": "Now provide your final answer."})
                 final_resp = await async_caller(clean_messages, tools=None)
+                final_prompt = _prompt_text_for_usage(
+                    use_structured_tools=True,
+                    tool_messages=clean_messages,
+                    current_prompt=current_prompt,
+                )
             else:
                 final_resp = await async_caller(current_prompt, tools=None)
+                final_prompt = current_prompt
 
-            if isinstance(final_resp, str):
-                if final_resp:
-                    return final_resp, total_tokens + self.token_counter(final_resp)
-            else:
-                final_content = getattr(final_resp, "content", "") or ""
-                if final_content:
-                    return final_content, total_tokens + self.token_counter(final_content)
+            final_payload, final_usage = count_llm_call(
+                self.token_counter,
+                final_resp,
+                prompt_text=final_prompt,
+            )
+            accumulated_usage.add(final_usage)
+            final_text = response_text(final_payload)
+            if final_text:
+                return final_text, accumulated_usage
         except Exception as exc:  # noqa: BLE001
             logger.warning("Final summary call failed (async): {}", exc)
 
         for msg in reversed(tool_messages if use_structured_tools else []):
             if msg.get("role") == "assistant" and msg.get("content"):
-                return msg["content"], total_tokens
-        return last_content, total_tokens
+                return msg["content"], accumulated_usage
+        return last_content, accumulated_usage
 
     @staticmethod
     def _looks_like_sentence(text: str) -> bool:
@@ -608,7 +657,7 @@ class RunnerExecutionMixin:
         Heuristic: the first word is a pronoun or verb-phrase opener in any
         common language, so wrapping it with "You are ..." would produce a
         grammatically broken duplicate like "You are You are ..." or
-        "You are Ты — старший аналитик.".
+        "You are I am a senior analyst.".
 
         Covers: EN, RU, ZH, JA, KO, DE, FR, ES, PT, IT, AR, HI, TR, PL, NL.
         """
@@ -874,7 +923,8 @@ class RunnerExecutionMixin:
             agent_names: Mapping of agent IDs to names
             memory_context: Optional list of memory entries
             include_query: Whether to include the task query in the prompt.
-                          Controlled via config.broadcast_task_to_all.
+                          When ``broadcast_task_to_all`` is False, callers should derive this
+                          from the current graph via ``_should_include_query_for_agent``.
 
         """
         # Build system prompt
@@ -940,6 +990,8 @@ class RunnerExecutionMixin:
         agent_lookup: dict[str, Any],
         agent_names: dict[str, str],
         query: str,
+        *,
+        include_query: bool = True,
     ) -> StepResult:
         """
         Execute a step synchronously with retries and token counting.
@@ -965,7 +1017,7 @@ class RunnerExecutionMixin:
 
         incoming = {p: messages[p] for p in step.predecessors if p in messages}
         memory_context = self._get_memory_context(step.agent_id)
-        prompt = self._build_prompt(agent, query, incoming, agent_names, memory_context)
+        prompt = self._build_prompt(agent, query, incoming, agent_names, memory_context, include_query=include_query)
 
         if self._budget_tracker:
             can, reason = self._budget_tracker.can_execute(step.agent_id)
@@ -986,7 +1038,7 @@ class RunnerExecutionMixin:
         for attempt in range(self.config.max_retries + 1):
             try:
                 # Execute with tools support
-                response, tokens = self._run_agent_with_tools(
+                response, usage = self._run_agent_with_tools(
                     caller=caller,
                     prompt=prompt,
                     agent=agent,
@@ -1000,7 +1052,9 @@ class RunnerExecutionMixin:
                     agent_id=step.agent_id,
                     success=True,
                     response=response,
-                    tokens_used=tokens,
+                    tokens_used=usage.total_tokens,
+                    prompt_tokens=usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens,
                     quality_score=quality,
                 )
             except (ExecutionError, ValueError, TypeError, KeyError, RuntimeError, OSError) as e:
@@ -1031,6 +1085,8 @@ class RunnerExecutionMixin:
         agent_lookup: dict[str, Any],
         agent_names: dict[str, str],
         query: str,
+        *,
+        include_query: bool = True,
     ) -> StepResult:
         """
         Execute a step asynchronously with retries and timeout.
@@ -1061,7 +1117,7 @@ class RunnerExecutionMixin:
 
         incoming = {p: messages[p] for p in step.predecessors if p in messages}
         memory_context = self._get_memory_context(step.agent_id)
-        prompt = self._build_prompt(agent, query, incoming, agent_names, memory_context)
+        prompt = self._build_prompt(agent, query, incoming, agent_names, memory_context, include_query=include_query)
 
         if self._budget_tracker:
             can, reason = self._budget_tracker.can_execute(step.agent_id)
@@ -1081,7 +1137,7 @@ class RunnerExecutionMixin:
 
         for attempt in range(self.config.max_retries + 1):
             try:
-                response, tokens = await asyncio.wait_for(
+                response, usage = await asyncio.wait_for(
                     self._run_agent_with_tools_async(
                         async_caller=async_caller,
                         prompt=prompt,
@@ -1098,7 +1154,9 @@ class RunnerExecutionMixin:
                     agent_id=step.agent_id,
                     success=True,
                     response=response,
-                    tokens_used=tokens,
+                    tokens_used=usage.total_tokens,
+                    prompt_tokens=usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens,
                     quality_score=quality,
                 )
             except TimeoutError:
@@ -1132,9 +1190,20 @@ class RunnerExecutionMixin:
         agent_lookup: dict[str, Any],
         agent_names: dict[str, str],
         query: str,
+        role_graph: Any,
     ) -> list[tuple[Any, StepResult]]:
         """Execute a group of steps in parallel asynchronously."""
-        tasks = [self._execute_step_async(step, messages, agent_lookup, agent_names, query) for step in steps]
+        tasks = [
+            self._execute_step_async(
+                step,
+                messages,
+                agent_lookup,
+                agent_names,
+                query,
+                include_query=self._should_include_query_for_agent(role_graph, step.agent_id),
+            )
+            for step in steps
+        ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -1415,7 +1484,10 @@ class RunnerExecutionMixin:
                 incoming_hidden = self._get_incoming_hidden(agent_id, incoming_ids, hidden_states)
 
                 memory_context = self._get_memory_context(agent_id)
-                prompt = self._build_prompt(agent, query, incoming_messages, agent_names, memory_context)
+                include_query = self._should_include_query_for_agent(role_graph, agent_id)
+                prompt = self._build_prompt(
+                    agent, query, incoming_messages, agent_names, memory_context, include_query=include_query
+                )
 
                 if incoming_hidden and incoming_hidden.metadata:
                     context_hint = self._format_hidden_context(incoming_hidden)
@@ -1459,13 +1531,13 @@ class RunnerExecutionMixin:
                             fallback_attempts[agent_id] = attempts + 1
                         continue
 
-                    response, tokens = self._run_agent_with_tools(
+                    response, usage = self._run_agent_with_tools(
                         caller=caller,
                         prompt=prompt,
                         agent=agent,
                     )
                     messages[agent_id] = response
-                    total_tokens += tokens
+                    total_tokens += usage.total_tokens
                     execution_order.append(agent_id)
                     self._save_to_memory(agent_id, response, incoming_ids)
 
@@ -1477,10 +1549,12 @@ class RunnerExecutionMixin:
                         agent_id=agent_id,
                         success=True,
                         response=response,
-                        tokens_used=tokens,
+                        tokens_used=usage.total_tokens,
+                        prompt_tokens=usage.prompt_tokens,
+                        completion_tokens=usage.completion_tokens,
                     )
                     step_results[agent_id] = result
-                    plan.mark_completed(step, tokens)
+                    plan.mark_completed(step, usage.total_tokens)
 
                 except (ExecutionError, ValueError, TypeError, KeyError, RuntimeError, OSError) as e:
                     messages[agent_id] = f"[Error: {e}]"
@@ -1535,7 +1609,10 @@ class RunnerExecutionMixin:
                 incoming_hidden = self._get_incoming_hidden(agent_id, incoming_ids, hidden_states)
 
                 memory_context = self._get_memory_context(agent_id)
-                prompt = self._build_prompt(agent, query, incoming_messages, agent_names, memory_context)
+                include_query = self._should_include_query_for_agent(role_graph, agent_id)
+                prompt = self._build_prompt(
+                    agent, query, incoming_messages, agent_names, memory_context, include_query=include_query
+                )
 
                 if incoming_hidden and incoming_hidden.metadata:
                     context_hint = self._format_hidden_context(incoming_hidden)
@@ -1568,13 +1645,13 @@ class RunnerExecutionMixin:
                         )
                         continue
 
-                    response, tokens = self._run_agent_with_tools(
+                    response, usage = self._run_agent_with_tools(
                         caller=caller,
                         prompt=prompt,
                         agent=agent,
                     )
                     messages[agent_id] = response
-                    total_tokens += tokens
+                    total_tokens += usage.total_tokens
                     execution_order.append(agent_id)
                     self._save_to_memory(agent_id, response, incoming_ids)
 
@@ -1585,7 +1662,9 @@ class RunnerExecutionMixin:
                         agent_id=agent_id,
                         success=True,
                         response=response,
-                        tokens_used=tokens,
+                        tokens_used=usage.total_tokens,
+                        prompt_tokens=usage.prompt_tokens,
+                        completion_tokens=usage.completion_tokens,
                     )
                     step_results[agent_id] = result
                 except (ExecutionError, ValueError, TypeError, KeyError, RuntimeError, OSError) as e:

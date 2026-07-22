@@ -8,6 +8,7 @@ import time as _time
 from collections import OrderedDict
 from typing import Any
 
+from ._providers import ImageSearchResult
 from ._utils import normalize_url
 
 
@@ -168,7 +169,7 @@ class SearchCache:
         max_results: int,
         *,
         provider: str | None = None,
-    ) -> list[dict[str, str]] | None:
+    ) -> list[ImageSearchResult] | None:
         key = self._make_image_search_key(query, max_results, provider=provider)
         with self._lock:
             return self._get(key)
@@ -177,7 +178,7 @@ class SearchCache:
         self,
         query: str,
         max_results: int,
-        results: list[dict[str, str]],
+        results: list[ImageSearchResult],
         *,
         provider: str | None = None,
     ) -> None:

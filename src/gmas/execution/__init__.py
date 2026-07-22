@@ -198,6 +198,7 @@ from .scheduler import (
     RoutingPolicy,
     StepResult,
     # Core functions
+    agentprune,
     build_execution_order,
     extract_agent_adjacency,
     filter_reachable_agents,
@@ -235,6 +236,17 @@ from .streaming import (
     format_event,
     print_stream,
     stream_to_string,
+)
+from .usage import (
+    LLMCallResult,
+    LLMUsage,
+    budget_prompt_completion,
+    count_llm_call,
+    extract_llm_usage,
+    safe_llm_usage_dict,
+    unwrap_llm_content,
+    unwrap_llm_text,
+    usage_to_observability_dict,
 )
 
 __all__ = [
@@ -276,7 +288,9 @@ __all__ = [
     "FileCallbackHandler",
     "HiddenState",
     # Multi-model support
+    "LLMCallResult",
     "LLMCallerFactory",
+    "LLMUsage",
     "MACPResult",
     # Runner
     "MACPRunner",
@@ -311,21 +325,29 @@ __all__ = [
     "TopologyAction",
     "TopologyChangedEvent",
     "ValidationError",
+    # Core scheduling functions
+    "agentprune",
     "aprint_stream",
     "astream_to_string",
-    # Core scheduling functions
+    "budget_prompt_completion",
     "build_execution_order",
     "collect_metrics",
+    "count_llm_call",
     "create_openai_async_structured_caller",
     "create_openai_caller",
     "create_openai_structured_caller",
     "extract_agent_adjacency",
+    "extract_llm_usage",
     "filter_reachable_agents",
     "format_event",
     "get_incoming_agents",
     "get_outgoing_agents",
     "get_parallel_groups",
     "print_stream",
+    "safe_llm_usage_dict",
     "stream_to_string",
     "trace_as_callback",
+    "unwrap_llm_content",
+    "unwrap_llm_text",
+    "usage_to_observability_dict",
 ]

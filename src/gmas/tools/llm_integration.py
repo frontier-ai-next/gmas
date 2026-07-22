@@ -23,11 +23,29 @@ Usage:
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Self, overload
+
+from openai.types.shared import ReasoningEffort
 
 from gmas.config.logging import logger
+from gmas.execution.usage import LLMUsage, usage_from_object
 
 from .base import ToolCall
+
+
+class _ProviderText(str):
+    """String response that retains provider metadata for token accounting."""
+
+    __slots__ = ("raw_response", "usage")
+
+    usage: Any
+    raw_response: Any
+
+    def __new__(cls, content: str, *, usage: Any = None, raw_response: Any = None) -> Self:
+        instance = super().__new__(cls, content)
+        instance.usage = usage
+        instance.raw_response = raw_response
+        return instance
 
 
 @dataclass
@@ -62,6 +80,7 @@ class LLMResponse:
     content: str = ""
     tool_calls: list[LLMToolCall] = field(default_factory=list)
     raw_response: Any = None
+    usage: LLMUsage | None = None
 
     @property
     def has_tool_calls(self) -> bool:
@@ -126,6 +145,7 @@ def parse_openai_response(response: Any) -> LLMResponse:
         content=message.content or "",
         tool_calls=tool_calls,
         raw_response=response,
+        usage=usage_from_object(response),
     )
 
 
@@ -159,6 +179,7 @@ def parse_anthropic_response(response: Any) -> LLMResponse:
         content="\n".join(content_parts),
         tool_calls=tool_calls,
         raw_response=response,
+        usage=usage_from_object(response),
     )
 
 
@@ -168,8 +189,8 @@ class OpenAICaller:
 
     This is the RECOMMENDED way to create callers for agents.
 
-    - Without tools: returns str (like a regular caller)
-    - With tools: returns LLMResponse with tool_calls
+    - Without tools: returns ``str`` with provider usage metadata
+    - With tools: returns :class:`LLMResponse` with tool_calls and provider usage
 
     Example:
         from openai import OpenAI
@@ -177,7 +198,7 @@ class OpenAICaller:
         client = OpenAI(api_key="...")
         caller = OpenAICaller(client, model="gpt-4")
 
-        # Without tools — regular text response
+        # Without tools — string with provider usage metadata
         response = caller("Hello!")  # -> str
 
         # With tools — LLMResponse with tool_calls
@@ -196,6 +217,7 @@ class OpenAICaller:
         max_tokens: int = 2048,
         system_prompt: str | None = None,
         tool_choice: str = "auto",  # "auto" = LLM decides, "required" = mandatory
+        reasoning_effort: ReasoningEffort = None,
         max_retries: int = 5,
         retry_base_delay: float = 2.0,
     ):
@@ -211,6 +233,7 @@ class OpenAICaller:
             tool_choice: Tool usage policy:
                 - "auto": LLM decides whether to use tools (default)
                 - "required": LLM MUST call a tool
+            reasoning_effort: Optional OpenAI-compatible reasoning effort, e.g. "low".
             max_retries: Maximum number of retries for transient errors (default 5).
             retry_base_delay: Base delay in seconds for exponential backoff (default 2.0).
 
@@ -221,9 +244,25 @@ class OpenAICaller:
         self.max_tokens = max_tokens
         self.system_prompt = system_prompt
         self.tool_choice = tool_choice
+        self.reasoning_effort = reasoning_effort
+        self._reasoning_kwargs = {} if reasoning_effort is None else {"reasoning_effort": reasoning_effort}
         self.max_retries = max_retries
         self.retry_base_delay = retry_base_delay
         self.supports_structured = True
+
+    @overload
+    def __call__(
+        self,
+        prompt: str | list[dict[str, str]],
+        tools: None = None,
+    ) -> str: ...
+
+    @overload
+    def __call__(
+        self,
+        prompt: str | list[dict[str, str]],
+        tools: list[dict[str, Any]],
+    ) -> LLMResponse: ...
 
     def __call__(
         self,
@@ -263,6 +302,7 @@ class OpenAICaller:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = self.tool_choice
+        kwargs.update(self._reasoning_kwargs)
 
         last_exc: Exception | None = None
         for attempt in range(self.max_retries + 1):
@@ -272,7 +312,11 @@ class OpenAICaller:
                 if tools:
                     return parse_openai_response(response)
 
-                return response.choices[0].message.content or ""
+                return _ProviderText(
+                    response.choices[0].message.content or "",
+                    usage=getattr(response, "usage", None),
+                    raw_response=response,
+                )
             except Exception as exc:
                 last_exc = exc
                 retryable = False
@@ -314,6 +358,7 @@ def create_openai_caller(
     max_tokens: int = 2048,
     system_prompt: str | None = None,
     tool_choice: str = "auto",
+    reasoning_effort: ReasoningEffort = None,
     http_proxy: str | None = None,
 ) -> OpenAICaller:
     """
@@ -332,6 +377,7 @@ def create_openai_caller(
         tool_choice: Tool usage policy:
             - "auto": LLM decides whether to use tools (default)
             - "required": LLM MUST call a tool
+        reasoning_effort: Optional OpenAI-compatible reasoning effort, e.g. "low".
         http_proxy: HTTP/HTTPS/SOCKS5 proxy URL, e.g. "http://127.0.0.1:8080"
             or "socks5://127.0.0.1:1080". If not set, falls back to the
             ``LLM_HTTP_PROXY`` / ``HTTPS_PROXY`` / ``HTTP_PROXY`` environment
@@ -347,8 +393,8 @@ def create_openai_caller(
             model="gpt-4",
         )
 
-        # Without tools — plain text
-        response = caller("Hello!")  # -> str
+        # Without tools — str
+        response = caller("Hello!")
 
         # With tools — LLMResponse
         response = caller("Calculate fib(10)", tools=[...])
@@ -395,6 +441,7 @@ def create_openai_caller(
         max_tokens=max_tokens,
         system_prompt=system_prompt,
         tool_choice=tool_choice,
+        reasoning_effort=reasoning_effort,
     )
 
 

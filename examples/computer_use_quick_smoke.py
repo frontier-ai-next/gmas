@@ -67,14 +67,14 @@ def main() -> None:
             {
                 "type": "text",
                 "text": (
-                    "Кратко на русском (1-2 предложения) опиши, что видно на скриншоте/экране. "
-                    "Если неуверен, так и напиши."
+                    "Briefly describe what is visible in the screenshot or on the screen "
+                    "in one or two sentences. If you are unsure, say so."
                 ),
             }
         )
 
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": "Ты кратко и фактически описываешь экран пользователя."},
+            {"role": "system", "content": "Describe the user's screen briefly and factually."},
             {"role": "user", "content": content},
         ]
 

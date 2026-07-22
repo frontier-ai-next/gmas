@@ -28,7 +28,7 @@ import random
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unicodedata import normalize
 
 import torch
@@ -111,7 +111,7 @@ def _validate_llm_config() -> tuple[str, str, str]:
         sys.exit(1)
 
     # All three are guaranteed non-None — sys.exit(1) fires above if any is missing.
-    return api_key, base_url, model
+    return cast("str", api_key), cast("str", base_url), cast("str", model)
 
 
 # -- 1. Graph construction ---------------------------------------------------
@@ -358,17 +358,20 @@ def train_model(train_data: list[Any], val_data: list[Any], in_ch: int) -> Any:
 def demo_inference(graph: RoleGraph, model: Any, tracker: MetricsTracker) -> None:
     router = GNNRouterInference(model, DefaultFeatureGenerator())
 
-    for strategy, label, kw in [
-        (RoutingStrategy.ARGMAX, "ARGMAX", {"candidates": ["researcher", "analyst"]}),
-        (RoutingStrategy.TOP_K, "TOP_K (3)", {"top_k": 3}),
-        (RoutingStrategy.THRESHOLD, "THRESHOLD (>=0.1)", {"threshold": 0.1}),
-    ]:
+    cases: tuple[tuple[RoutingStrategy, str, list[str] | None, int, float], ...] = (
+        (RoutingStrategy.ARGMAX, "ARGMAX", ["researcher", "analyst"], 3, 0.5),
+        (RoutingStrategy.TOP_K, "TOP_K (3)", None, 3, 0.5),
+        (RoutingStrategy.THRESHOLD, "THRESHOLD (>=0.1)", None, 3, 0.1),
+    )
+    for strategy, label, candidates, top_k, threshold in cases:
         result = router.predict(
             graph,
             source="coordinator",
+            candidates=candidates,
             metrics_tracker=tracker,
             strategy=strategy,
-            **kw,
+            top_k=top_k,
+            threshold=threshold,
         )
         print(f"  {label:<20} -> {result}")
 

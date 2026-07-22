@@ -1,0 +1,29 @@
+name: Feature request
+description: Propose a focused capability or public API improvement.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What limitation or use case should this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed direction
+      description: Describe the desired behavior and, if relevant, a small API sketch.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or alternative designs have you considered?
+  - type: textarea
+    id: impact
+    attributes:
+      label: Compatibility and research impact
+      description: Note effects on graph semantics, execution, reproducibility, or existing users.

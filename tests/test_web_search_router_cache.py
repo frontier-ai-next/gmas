@@ -1,7 +1,7 @@
 """Tests for web_search SearchRouter and SearchCache."""
 
 from gmas.tools.web_search._cache import SearchCache
-from gmas.tools.web_search._providers import SearchProvider
+from gmas.tools.web_search._providers import ImageSearchResult, SearchProvider
 from gmas.tools.web_search._router import IntentClassifier, SearchRouter
 
 
@@ -126,7 +126,9 @@ class TestSearchCache:
 
     def test_image_search_roundtrip(self):
         c = SearchCache(max_entries=4, ttl=60.0)
-        rows = [{"url": "http://img"}]
+        rows: list[ImageSearchResult] = [
+            {"title": "Cat", "url": "http://source", "image_url": "http://img", "snippet": ""}
+        ]
         c.put_image_search("cat", 3, rows, provider="p")
         assert c.get_image_search("cat", 3, provider="p") == rows
 

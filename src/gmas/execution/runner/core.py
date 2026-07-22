@@ -6,8 +6,8 @@ from .shared import (
     AgentMemory,
     Any,
     AsyncIterator,
+    AsyncLLMCallerProtocol,
     AsyncStructuredLLMCallerProtocol,
-    Awaitable,
     BudgetTracker,
     Callable,
     CallbackManager,
@@ -16,6 +16,8 @@ from .shared import (
     Handler,
     Iterator,
     LLMCallerFactory,
+    LLMCallerProtocol,
+    LLMCallerResult,
     MemoryConfig,
     RunnerConfig,
     SharedMemoryPool,
@@ -32,8 +34,8 @@ from .shared import (
 class RunnerCoreMixin:
     def __init__(
         self,
-        llm_caller: Callable[[str], str] | None = None,
-        async_llm_caller: Callable[[str], Awaitable[str]] | None = None,
+        llm_caller: LLMCallerProtocol | None = None,
+        async_llm_caller: AsyncLLMCallerProtocol | None = None,
         streaming_llm_caller: Callable[[str], Iterator[str]] | None = None,
         async_streaming_llm_caller: Callable[[str], AsyncIterator[str]] | None = None,
         token_counter: Callable[[str], int] | None = None,
@@ -41,8 +43,8 @@ class RunnerCoreMixin:
         timeout: int = 60,
         memory_pool: SharedMemoryPool | None = None,
         # Multi-model support
-        llm_callers: dict[str, Callable[[str], str]] | None = None,
-        async_llm_callers: dict[str, Callable[[str], Awaitable[str]]] | None = None,
+        llm_callers: dict[str, LLMCallerProtocol] | None = None,
+        async_llm_callers: dict[str, AsyncLLMCallerProtocol] | None = None,
         llm_factory: LLMCallerFactory | None = None,
         # Tools support
         tool_registry: Any | None = None,
@@ -114,7 +116,7 @@ class RunnerCoreMixin:
         if llm_caller is None and structured_llm_caller is not None:
             _sc = structured_llm_caller  # capture for closure
 
-            def _str_wrapper(prompt: str) -> str:
+            def _str_wrapper(prompt: str) -> LLMCallerResult:
                 return _sc([{"role": "user", "content": prompt}])
 
             llm_caller = _str_wrapper
@@ -151,6 +153,12 @@ class RunnerCoreMixin:
         # Memory integration
         self._memory_pool: SharedMemoryPool | None = memory_pool
         self._agent_memories: dict[str, AgentMemory] = {}
+
+        # Cache stable node positions, not edge state. Edge weights remain live
+        # so topology hooks are reflected immediately; node changes invalidate
+        # the cache through the tuple key.
+        self._node_position_cache_key: tuple[str, ...] = ()
+        self._node_position_cache: dict[str, int] = {}
 
     @property
     def _run_id(self) -> uuid.UUID:
@@ -363,7 +371,7 @@ class RunnerCoreMixin:
         self,
         agent_id: str,
         agent: Any,
-    ) -> Callable[[str], str] | None:
+    ) -> LLMCallerProtocol | None:
         """
         Get sync LLM caller for a specific agent.
 
@@ -399,7 +407,7 @@ class RunnerCoreMixin:
         self,
         agent_id: str,
         agent: Any,
-    ) -> Callable[[str], Awaitable[str]] | None:
+    ) -> AsyncLLMCallerProtocol | None:
         """
         Get async LLM caller for a specific agent.
 
@@ -438,7 +446,7 @@ class RunnerCoreMixin:
     # Structured prompt dispatch
     # ------------------------------------------------------------------
 
-    def _call_llm(self, caller: Callable, prompt: StructuredPrompt) -> str:
+    def _call_llm(self, caller: LLMCallerProtocol, prompt: StructuredPrompt) -> LLMCallerResult:
         """
         Call the LLM using the best available interface.
 
@@ -450,7 +458,11 @@ class RunnerCoreMixin:
             return self.structured_llm_caller(prompt.messages)
         return caller(prompt.text)
 
-    async def _acall_llm(self, async_caller: Callable | None, prompt: StructuredPrompt) -> str:
+    async def _acall_llm(
+        self,
+        async_caller: AsyncLLMCallerProtocol | None,
+        prompt: StructuredPrompt,
+    ) -> LLMCallerResult:
         """Async version of :meth:`_call_llm`."""
         if self.async_structured_llm_caller is not None:
             return await self.async_structured_llm_caller(prompt.messages)
@@ -468,7 +480,7 @@ class RunnerCoreMixin:
             or (self.llm_factory and (self.llm_factory.default_caller or self.llm_factory.caller_builder))
         )
 
-    def _has_any_async_caller(self) -> bool:
+    def has_any_async_caller(self) -> bool:
         """Check whether at least one async LLM caller is available."""
         return bool(
             self.async_llm_caller
@@ -536,24 +548,27 @@ class RunnerCoreMixin:
         """Map id -> display_name/role for building the prompt."""
         return {a.agent_id: a.display_name or getattr(a, "role", a.agent_id) for a in role_graph.agents}
 
-    def _get_task_connected_agents(self, role_graph: Any) -> set[str]:
-        """Get the set of agents directly connected to the task node."""
-        if role_graph.task_node is None:
-            return set()
+    def _get_node_positions(self, role_graph: Any) -> dict[str, int]:
+        """Return cached adjacency positions, invalidating when graph nodes change."""
+        cache_key = tuple(role_graph.node_ids)
+        if cache_key != self._node_position_cache_key:
+            self._node_position_cache_key = cache_key
+            self._node_position_cache = {node_id: position for position, node_id in enumerate(cache_key)}
+        return self._node_position_cache
 
-        task_idx = role_graph.get_node_index(role_graph.task_node)
-        if task_idx is None or role_graph.A_com is None:
-            return set()
-
-        connected = set()
-        for agent in role_graph.agents:
-            agent_idx = role_graph.get_node_index(agent.agent_id)
-            if agent_idx is not None and agent_idx != task_idx and role_graph.A_com[task_idx, agent_idx] > 0:
-                connected.add(agent.agent_id)
-        return connected
-
-    def _should_include_query(self, agent_id: str, task_connected: set[str]) -> bool:
-        """Determine whether to include the query in the agent's prompt."""
+    def _should_include_query_for_agent(self, role_graph: Any, agent_id: str) -> bool:
+        """Check the live task-to-agent edge without caching topology state."""
         if self.config.broadcast_task_to_all:
             return True
-        return agent_id in task_connected
+
+        task_node = role_graph.task_node
+        adjacency = role_graph.A_com
+        if task_node is None or adjacency is None or adjacency.numel() == 0:
+            return False
+
+        positions = self._get_node_positions(role_graph)
+        task_position = positions.get(task_node)
+        agent_position = positions.get(agent_id)
+        if task_position is None or agent_position is None or task_position == agent_position:
+            return False
+        return bool(adjacency[task_position, agent_position].item() > 0)

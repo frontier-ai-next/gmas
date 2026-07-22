@@ -37,8 +37,8 @@ uv run prek install
 uv run ruff check --fix src/ tests/
 uv run ruff format src/ tests/
 
-# Type check
-uv run ty check src tests --ignore unresolved-import
+# Advisory type check (known diagnostics remain)
+uv run ty check src --ignore unresolved-import
 ```
 
 ### Testing

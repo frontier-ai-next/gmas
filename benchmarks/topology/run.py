@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 from unicodedata import normalize
 
 try:
@@ -50,8 +50,7 @@ from gmas.builder import BuilderConfig, GraphBuilder
 from gmas.execution import MACPRunner, RunnerConfig, StreamEventType
 
 try:
-    from typing import TypedDict
-
+    from langchain_core.runnables import RunnableLambda
     from langgraph.graph import END, START, StateGraph
 
     LANGGRAPH_AVAILABLE = True
@@ -232,7 +231,10 @@ def _load_local_env(path: Path) -> None:
 
 
 def _validate_llm_config(cfg: BenchmarkConfig) -> tuple[str, str, str]:
-    _load_local_env(Path(__file__).resolve().parents[1] / ".env")
+    root = Path(__file__).resolve().parents[2]
+    _load_local_env(root / ".env")
+    _load_local_env(root / "benchmarks" / ".env")
+    _load_local_env(Path(__file__).resolve().parent / ".env")
     api_key = os.getenv(cfg.env_api_key, cfg.env_defaults.get(cfg.env_api_key, ""))
     base_url = os.getenv(cfg.env_base_url, cfg.env_defaults.get(cfg.env_base_url, ""))
     model = os.getenv(cfg.env_model, cfg.env_defaults.get(cfg.env_model, ""))
@@ -988,26 +990,27 @@ def _build_single_langgraph(llm: TrackedLLM, problem: str) -> dict[str, Any]:
     if not LANGGRAPH_AVAILABLE:
         return _langgraph_unavailable()
 
-    class State(TypedDict):
+    @dataclass
+    class State:
         input: str
         output: str
 
     def solver_node(state: State) -> dict[str, str]:
         system = (
             _mc_prompt("Solve the task carefully and provide the correct final answer.")
-            if _is_mc(state["input"])
+            if _is_mc(state.input)
             else "Solve the task carefully and provide the correct final answer. "
             "Provide the answer in a clear, task-appropriate format."
         )
-        return {"output": llm.chat(system, state["input"], agent_name="solver")}
+        return {"output": llm.chat(system, state.input, agent_name="solver")}
 
     llm.reset()
     t0 = time.perf_counter()
     g = StateGraph(State)
-    g.add_node("solver", solver_node)
+    g.add_node("solver", solver_node, input_schema=State)
     g.set_entry_point("solver")
     g.set_finish_point("solver")
-    result = g.compile().invoke({"input": problem, "output": ""})
+    result = g.compile().invoke(State(input=problem, output=""))
     elapsed = time.perf_counter() - t0
     output = result["output"]
     _log_framework_result("LangGraph", "single_agent", -1, output, elapsed, llm.total_tokens, llm.call_count)
@@ -1024,7 +1027,8 @@ def _build_chain_langgraph(llm: TrackedLLM, problem: str) -> dict[str, Any]:
     if not LANGGRAPH_AVAILABLE:
         return _langgraph_unavailable()
 
-    class State(TypedDict):
+    @dataclass
+    class State:
         input: str
         step1: str
         step2: str
@@ -1034,7 +1038,7 @@ def _build_chain_langgraph(llm: TrackedLLM, problem: str) -> dict[str, Any]:
         return {
             "step1": llm.chat(
                 "Analyze the task, identify its type, key constraints, and the best approach to solve it.",
-                f"Task: {s['input']}",
+                f"Task: {s.input}",
                 agent_name="analyzer",
             )
         }
@@ -1043,7 +1047,7 @@ def _build_chain_langgraph(llm: TrackedLLM, problem: str) -> dict[str, Any]:
         return {
             "step2": llm.chat(
                 "Solve the task using the proposed approach. Be accurate, complete, and logically consistent.",
-                f"Analysis:\n{s['step1']}",
+                f"Analysis:\n{s.step1}",
                 agent_name="solver",
             )
         }
@@ -1051,21 +1055,22 @@ def _build_chain_langgraph(llm: TrackedLLM, problem: str) -> dict[str, Any]:
     def formatter(s: State) -> dict[str, str]:
         system = (
             _mc_prompt("Produce the final answer in the required format.")
-            if _is_mc(s["input"])
+            if _is_mc(s.input)
             else "Produce the final answer in the required format. Provide a concise and clear final answer."
         )
-        return {"output": llm.chat(system, f"Solution:\n{s['step2']}", agent_name="formatter")}
+        return {"output": llm.chat(system, f"Solution:\n{s.step2}", agent_name="formatter")}
 
     llm.reset()
     t0 = time.perf_counter()
     g = StateGraph(State)
-    for name, fn in [("analyzer", analyzer), ("solver", solver), ("formatter", formatter)]:
-        g.add_node(name, fn)
+    g.add_node("analyzer", RunnableLambda(analyzer), input_schema=State)
+    g.add_node("solver", RunnableLambda(solver), input_schema=State)
+    g.add_node("formatter", RunnableLambda(formatter), input_schema=State)
     g.add_edge("analyzer", "solver")
     g.add_edge("solver", "formatter")
     g.set_entry_point("analyzer")
     g.set_finish_point("formatter")
-    result = g.compile().invoke({"input": problem, "step1": "", "step2": "", "output": ""})
+    result = g.compile().invoke(State(input=problem, step1="", step2="", output=""))
     elapsed = time.perf_counter() - t0
     output = result["output"]
     _log_framework_result("LangGraph", "chain_3", -1, output, elapsed, llm.total_tokens, llm.call_count)
@@ -1082,7 +1087,8 @@ def _build_fanin_langgraph(llm: TrackedLLM, problem: str) -> dict[str, Any]:
     if not LANGGRAPH_AVAILABLE:
         return _langgraph_unavailable()
 
-    class State(TypedDict):
+    @dataclass
+    class State:
         input: str
         solution_a: str
         solution_b: str
@@ -1092,7 +1098,7 @@ def _build_fanin_langgraph(llm: TrackedLLM, problem: str) -> dict[str, Any]:
         return {
             "solution_a": llm.chat(
                 "Solve the task using one strong, self-consistent line of reasoning.",
-                f"Task: {s['input']}",
+                f"Task: {s.input}",
                 agent_name="reasoner_a",
             )
         }
@@ -1101,7 +1107,7 @@ def _build_fanin_langgraph(llm: TrackedLLM, problem: str) -> dict[str, Any]:
         return {
             "solution_b": llm.chat(
                 "Solve the task using a different reasoning path or perspective from Reasoner A.",
-                f"Task: {s['input']}",
+                f"Task: {s.input}",
                 agent_name="reasoner_b",
             )
         }
@@ -1111,27 +1117,27 @@ def _build_fanin_langgraph(llm: TrackedLLM, problem: str) -> dict[str, Any]:
             _mc_prompt(
                 "Compare both candidate solutions, resolve any disagreements, and provide the final correct answer."
             )
-            if _is_mc(s["input"])
+            if _is_mc(s.input)
             else "Compare both candidate solutions, resolve any disagreements, and provide the final correct answer."
         )
         return {
             "output": llm.chat(
-                system, f"Solution A:\n{s['solution_a']}\n\nSolution B:\n{s['solution_b']}", agent_name="aggregator"
+                system, f"Solution A:\n{s.solution_a}\n\nSolution B:\n{s.solution_b}", agent_name="aggregator"
             )
         }
 
     llm.reset()
     t0 = time.perf_counter()
     g = StateGraph(State)
-    g.add_node("reasoner_a", reasoner_a)
-    g.add_node("reasoner_b", reasoner_b)
-    g.add_node("aggregator", aggregator)
+    g.add_node("reasoner_a", RunnableLambda(reasoner_a), input_schema=State)
+    g.add_node("reasoner_b", RunnableLambda(reasoner_b), input_schema=State)
+    g.add_node("aggregator", RunnableLambda(aggregator), input_schema=State)
     g.add_edge(START, "reasoner_a")
     g.add_edge(START, "reasoner_b")
     g.add_edge("reasoner_a", "aggregator")
     g.add_edge("reasoner_b", "aggregator")
     g.add_edge("aggregator", END)
-    result = g.compile().invoke({"input": problem, "solution_a": "", "solution_b": "", "output": ""})
+    result = g.compile().invoke(State(input=problem, solution_a="", solution_b="", output=""))
     elapsed = time.perf_counter() - t0
     output = result["output"]
     _log_framework_result("LangGraph", "fan_in", -1, output, elapsed, llm.total_tokens, llm.call_count)
@@ -1148,7 +1154,8 @@ def _build_fanout_langgraph(llm: TrackedLLM, problem: str) -> dict[str, Any]:
     if not LANGGRAPH_AVAILABLE:
         return _langgraph_unavailable()
 
-    class State(TypedDict):
+    @dataclass
+    class State:
         input: str
         plan: str
         solution_a: str
@@ -1160,7 +1167,7 @@ def _build_fanout_langgraph(llm: TrackedLLM, problem: str) -> dict[str, Any]:
         return {
             "plan": llm.chat(
                 "Analyze the task and propose three distinct ways to approach it.",
-                f"Task: {s['input']}",
+                f"Task: {s.input}",
                 agent_name="planner",
             )
         }
@@ -1169,7 +1176,7 @@ def _build_fanout_langgraph(llm: TrackedLLM, problem: str) -> dict[str, Any]:
         return {
             "solution_a": llm.chat(
                 "Solve the task using the first proposed approach.",
-                f"Plan:\n{s['plan']}",
+                f"Plan:\n{s.plan}",
                 agent_name="reasoner_a",
             )
         }
@@ -1178,7 +1185,7 @@ def _build_fanout_langgraph(llm: TrackedLLM, problem: str) -> dict[str, Any]:
         return {
             "solution_b": llm.chat(
                 "Solve the task using the second proposed approach.",
-                f"Plan:\n{s['plan']}",
+                f"Plan:\n{s.plan}",
                 agent_name="reasoner_b",
             )
         }
@@ -1187,7 +1194,7 @@ def _build_fanout_langgraph(llm: TrackedLLM, problem: str) -> dict[str, Any]:
         return {
             "solution_c": llm.chat(
                 "Solve the task using the third proposed approach or a substantially different perspective.",
-                f"Plan:\n{s['plan']}",
+                f"Plan:\n{s.plan}",
                 agent_name="reasoner_c",
             )
         }
@@ -1195,13 +1202,13 @@ def _build_fanout_langgraph(llm: TrackedLLM, problem: str) -> dict[str, Any]:
     def synthesizer(s: State) -> dict[str, str]:
         system = (
             _mc_prompt("Compare all candidate solutions, resolve conflicts, and provide the final correct answer.")
-            if _is_mc(s["input"])
+            if _is_mc(s.input)
             else "Compare all candidate solutions, resolve conflicts, and provide the final correct answer."
         )
         return {
             "output": llm.chat(
                 system,
-                f"Solution A:\n{s['solution_a']}\n\nSolution B:\n{s['solution_b']}\n\nSolution C:\n{s['solution_c']}",
+                f"Solution A:\n{s.solution_a}\n\nSolution B:\n{s.solution_b}\n\nSolution C:\n{s.solution_c}",
                 agent_name="synthesizer",
             )
         }
@@ -1209,22 +1216,17 @@ def _build_fanout_langgraph(llm: TrackedLLM, problem: str) -> dict[str, Any]:
     llm.reset()
     t0 = time.perf_counter()
     g = StateGraph(State)
-    for name, fn in [
-        ("planner", planner),
-        ("reasoner_a", reasoner_a),
-        ("reasoner_b", reasoner_b),
-        ("reasoner_c", reasoner_c),
-        ("synthesizer", synthesizer),
-    ]:
-        g.add_node(name, fn)
+    g.add_node("planner", RunnableLambda(planner), input_schema=State)
+    g.add_node("reasoner_a", RunnableLambda(reasoner_a), input_schema=State)
+    g.add_node("reasoner_b", RunnableLambda(reasoner_b), input_schema=State)
+    g.add_node("reasoner_c", RunnableLambda(reasoner_c), input_schema=State)
+    g.add_node("synthesizer", RunnableLambda(synthesizer), input_schema=State)
     g.add_edge(START, "planner")
     for branch in ("reasoner_a", "reasoner_b", "reasoner_c"):
         g.add_edge("planner", branch)
         g.add_edge(branch, "synthesizer")
     g.add_edge("synthesizer", END)
-    result = g.compile().invoke(
-        {"input": problem, "plan": "", "solution_a": "", "solution_b": "", "solution_c": "", "output": ""}
-    )
+    result = g.compile().invoke(State(input=problem, plan="", solution_a="", solution_b="", solution_c="", output=""))
     elapsed = time.perf_counter() - t0
     output = result["output"]
     _log_framework_result("LangGraph", "fan_out", -1, output, elapsed, llm.total_tokens, llm.call_count)

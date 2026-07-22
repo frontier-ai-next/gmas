@@ -44,14 +44,21 @@ graph = build_property_graph(
 ## Step 3: Configure LLM
 
 ```python
-import openai
+import os
+
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["LLM_API_KEY"],
+    base_url=os.environ.get("LLM_BASE_URL"),
+)
 
 def llm_caller(prompt: str) -> str:
-    response = openai.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
+    response = client.responses.create(
+        model=os.environ["LLM_MODEL"],
+        input=prompt,
     )
-    return response.choices[0].message.content
+    return response.output_text
 ```
 
 ## Step 4: Execute

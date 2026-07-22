@@ -4,15 +4,17 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, cast
 
 from gmas.core.agent import AgentLLMConfig
+from gmas.execution.usage import LLMCallResult, usage_from_object
 
 if TYPE_CHECKING:
     from openai.types.chat import ChatCompletionMessageParam
 
 
-LLMCallerProtocol = Callable[[str], str]
-AsyncLLMCallerProtocol = Callable[[str], Awaitable[str]]
-StructuredLLMCallerProtocol = Callable[[list[dict[str, str]]], str]
-AsyncStructuredLLMCallerProtocol = Callable[[list[dict[str, str]]], Awaitable[str]]
+LLMCallerResult = str | LLMCallResult
+LLMCallerProtocol = Callable[[str], LLMCallerResult]
+AsyncLLMCallerProtocol = Callable[[str], Awaitable[LLMCallerResult]]
+StructuredLLMCallerProtocol = Callable[[list[dict[str, str]]], LLMCallerResult]
+AsyncStructuredLLMCallerProtocol = Callable[[list[dict[str, str]]], Awaitable[LLMCallerResult]]
 
 
 class LLMCallerFactory:
@@ -146,13 +148,16 @@ def _create_openai_caller_from_config(config: AgentLLMConfig) -> LLMCallerProtoc
     gen_params = config.to_generation_params()
     model = config.model_name or "gpt-4"
 
-    def caller(prompt: str) -> str:
+    def caller(prompt: str) -> LLMCallResult:
         response = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             **gen_params,
         )
-        return response.choices[0].message.content or ""
+        return LLMCallResult(
+            content=response.choices[0].message.content or "",
+            usage=usage_from_object(response),
+        )
 
     return caller
 
@@ -175,13 +180,16 @@ def _create_async_openai_caller_from_config(config: AgentLLMConfig) -> AsyncLLMC
     gen_params = config.to_generation_params()
     model = config.model_name or "gpt-4"
 
-    async def caller(prompt: str) -> str:
+    async def caller(prompt: str) -> LLMCallResult:
         response = await client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             **gen_params,
         )
-        return response.choices[0].message.content or ""
+        return LLMCallResult(
+            content=response.choices[0].message.content or "",
+            usage=usage_from_object(response),
+        )
 
     return caller
 
@@ -220,14 +228,17 @@ def create_openai_structured_caller(
 
     client = OpenAI(api_key=api_key, base_url=base_url)
 
-    def caller(messages: list[dict[str, str]]) -> str:
+    def caller(messages: list[dict[str, str]]) -> LLMCallResult:
         response = client.chat.completions.create(
             model=model,
             messages=cast("list[ChatCompletionMessageParam]", messages),
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        return response.choices[0].message.content or ""
+        return LLMCallResult(
+            content=response.choices[0].message.content or "",
+            usage=usage_from_object(response),
+        )
 
     return caller
 
@@ -248,13 +259,16 @@ def create_openai_async_structured_caller(
 
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
-    async def caller(messages: list[dict[str, str]]) -> str:
+    async def caller(messages: list[dict[str, str]]) -> LLMCallResult:
         response = await client.chat.completions.create(
             model=model,
             messages=cast("list[ChatCompletionMessageParam]", messages),
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        return response.choices[0].message.content or ""
+        return LLMCallResult(
+            content=response.choices[0].message.content or "",
+            usage=usage_from_object(response),
+        )
 
     return caller

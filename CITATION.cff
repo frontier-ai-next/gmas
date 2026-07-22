@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: If you use gMAS in research, please cite this software and the relevant release.
+type: software
+title: "gMAS: Dynamic graph-based multi-agent systems"
+abstract: >-
+  gMAS is an open-source Python framework for building, executing, adapting,
+  and observing graph-based multi-agent systems with large language models.
+authors:
+  - family-names: Belov
+    given-names: Vitaly
+  - family-names: Sosedka
+    given-names: Artyom
+  - family-names: Tishin
+    given-names: Vladislav
+  - family-names: Bagdasaryan
+    given-names: Arkadiy
+repository-code: https://github.com/frontier-ai-next/gMAS
+url: https://frontier-ai-next.github.io/gMAS/
+license: MIT
+keywords:
+  - multi-agent systems
+  - large language models
+  - graph workflows
+  - agentic AI
+  - graph neural networks

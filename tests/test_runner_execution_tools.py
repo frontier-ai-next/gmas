@@ -1,10 +1,13 @@
 """Tests for MACPRunner tool-calling paths (execution mixin)."""
 
+from typing import ClassVar
+
 import pytest
 
 from gmas.core.agent import AgentProfile
 from gmas.execution.runner import MACPRunner, RunnerConfig
 from gmas.execution.runner.prompting import StructuredPrompt
+from gmas.execution.usage import LLMCallResult, LLMUsage
 from gmas.tools.base import BaseTool, ToolResult
 from gmas.tools.llm_integration import LLMResponse, LLMToolCall
 
@@ -46,9 +49,27 @@ class TestRunAgentWithToolsSync:
             return LLMResponse(content="final-from-plain", tool_calls=[])
 
         runner = MACPRunner(config=RunnerConfig(max_tool_iterations=4))
-        text, toks = runner._run_agent_with_tools(caller, "user task", agent)
+        text, usage = runner._run_agent_with_tools(caller, "user task", agent)
         assert "final answer" in text
-        assert toks >= 0
+        assert usage.total_tokens >= 0
+
+    def test_provider_usage_is_used_for_tool_loop(self):
+        agent = AgentProfile(agent_id="a0", display_name="A", tools=[_EchoTool()])
+
+        def caller(prompt, tools=None):
+            if tools:
+                return LLMResponse(
+                    content="final answer",
+                    tool_calls=[],
+                    usage=LLMUsage(prompt_tokens=100, completion_tokens=20, total_tokens=120),
+                )
+            return LLMCallResult(content="unused", usage=LLMUsage(total_tokens=1))
+
+        runner = MACPRunner(config=RunnerConfig(max_tool_iterations=2))
+        _text, usage = runner._run_agent_with_tools(caller, "user task", agent)
+        assert usage.total_tokens == 120
+        assert usage.prompt_tokens == 100
+        assert usage.completion_tokens == 20
 
     def test_caller_returns_string_with_tools_exits_early(self):
         agent = AgentProfile(agent_id="a0", display_name="A", tools=[_EchoTool()])
@@ -59,9 +80,68 @@ class TestRunAgentWithToolsSync:
             return "no-tools"
 
         runner = MACPRunner()
-        text, toks = runner._run_agent_with_tools(caller, "x", agent)
+        text, usage = runner._run_agent_with_tools(caller, "x", agent)
         assert text == "shortcut-string"
-        assert toks > 0
+        assert usage.total_tokens > 0
+
+    def test_provider_usage_on_string_result_is_authoritative(self):
+        agent = AgentProfile(agent_id="a0", display_name="A", tools=[_EchoTool()])
+
+        class ProviderText(str):  # noqa: SLOT000
+            usage: ClassVar[dict[str, int]] = {
+                "prompt_tokens": 70,
+                "completion_tokens": 30,
+                "total_tokens": 100,
+            }
+
+        def caller(prompt, tools=None):
+            return ProviderText("short")
+
+        runner = MACPRunner(token_counter=lambda _value: 1)
+        text, usage = runner._run_agent_with_tools(caller, "prompt", agent)
+        assert text == "short"
+        assert usage.prompt_tokens == 70
+        assert usage.completion_tokens == 30
+        assert usage.total_tokens == 100
+
+    def test_provider_usage_is_preserved_for_structured_prompt(self):
+        agent = AgentProfile(agent_id="a0", display_name="A")
+        prompt = StructuredPrompt("flat prompt", [{"role": "user", "content": "structured prompt"}])
+
+        def caller(_prompt):
+            return LLMCallResult(
+                content="answer",
+                usage=LLMUsage(prompt_tokens=70, completion_tokens=30, total_tokens=100),
+            )
+
+        runner = MACPRunner(token_counter=lambda _value: 1)
+        text, usage = runner._run_agent_with_tools(caller, prompt, agent)
+
+        assert text == "answer"
+        assert usage.prompt_tokens == 70
+        assert usage.completion_tokens == 30
+        assert usage.total_tokens == 100
+
+    def test_explicit_structured_caller_preserves_provider_usage(self):
+        agent = AgentProfile(agent_id="a0", display_name="A")
+        prompt = StructuredPrompt("flat prompt", [{"role": "user", "content": "structured prompt"}])
+
+        def structured_caller(_messages):
+            return LLMCallResult(
+                content="answer",
+                usage=LLMUsage(prompt_tokens=60, completion_tokens=40, total_tokens=100),
+            )
+
+        runner = MACPRunner(
+            structured_llm_caller=structured_caller,
+            token_counter=lambda _value: 1,
+        )
+        text, usage = runner._run_agent_with_tools(runner.llm_caller, prompt, agent)
+
+        assert text == "answer"
+        assert usage.prompt_tokens == 60
+        assert usage.completion_tokens == 40
+        assert usage.total_tokens == 100
 
     def test_caller_without_tools_param_plain_prompt(self):
         agent = AgentProfile(agent_id="a0", display_name="A", tools=[_EchoTool()])
@@ -123,9 +203,9 @@ class TestRunAgentWithToolsAsync:
             return LLMResponse(content="plain", tool_calls=[])
 
         runner = MACPRunner(config=RunnerConfig(max_tool_iterations=4))
-        text, toks = await runner._run_agent_with_tools_async(async_caller, "task", agent)
+        text, usage = await runner._run_agent_with_tools_async(async_caller, "task", agent)
         assert "async final" in text
-        assert toks >= 0
+        assert usage.total_tokens >= 0
 
     @pytest.mark.asyncio
     async def test_async_caller_returns_string_with_tools(self):
@@ -139,6 +219,64 @@ class TestRunAgentWithToolsAsync:
         runner = MACPRunner()
         text, _ = await runner._run_agent_with_tools_async(async_caller, "z", agent)
         assert text == "async-shortcut"
+
+    @pytest.mark.asyncio
+    async def test_async_provider_usage_on_string_result_is_authoritative(self):
+        agent = AgentProfile(agent_id="a0", display_name="A", tools=[_EchoTool()])
+
+        class ProviderText(str):  # noqa: SLOT000
+            usage: ClassVar[dict[str, int]] = {"input_tokens": 80, "output_tokens": 20}
+
+        async def async_caller(prompt, tools=None):
+            return ProviderText("short")
+
+        runner = MACPRunner(token_counter=lambda _value: 1)
+        text, usage = await runner._run_agent_with_tools_async(async_caller, "prompt", agent)
+        assert text == "short"
+        assert usage.prompt_tokens == 80
+        assert usage.completion_tokens == 20
+        assert usage.total_tokens == 100
+
+    @pytest.mark.asyncio
+    async def test_async_provider_usage_is_preserved_for_structured_prompt(self):
+        agent = AgentProfile(agent_id="a0", display_name="A")
+        prompt = StructuredPrompt("flat prompt", [{"role": "user", "content": "structured prompt"}])
+
+        async def async_caller(_prompt):
+            return LLMCallResult(
+                content="answer",
+                usage=LLMUsage(prompt_tokens=70, completion_tokens=30, total_tokens=100),
+            )
+
+        runner = MACPRunner(token_counter=lambda _value: 1)
+        text, usage = await runner._run_agent_with_tools_async(async_caller, prompt, agent)
+
+        assert text == "answer"
+        assert usage.prompt_tokens == 70
+        assert usage.completion_tokens == 30
+        assert usage.total_tokens == 100
+
+    @pytest.mark.asyncio
+    async def test_explicit_async_structured_caller_preserves_provider_usage(self):
+        agent = AgentProfile(agent_id="a0", display_name="A")
+        prompt = StructuredPrompt("flat prompt", [{"role": "user", "content": "structured prompt"}])
+
+        async def structured_caller(_messages):
+            return LLMCallResult(
+                content="answer",
+                usage=LLMUsage(prompt_tokens=60, completion_tokens=40, total_tokens=100),
+            )
+
+        runner = MACPRunner(
+            async_structured_llm_caller=structured_caller,
+            token_counter=lambda _value: 1,
+        )
+        text, usage = await runner._run_agent_with_tools_async(None, prompt, agent)
+
+        assert text == "answer"
+        assert usage.prompt_tokens == 60
+        assert usage.completion_tokens == 40
+        assert usage.total_tokens == 100
 
     @pytest.mark.asyncio
     async def test_async_plain_caller_no_tools_param(self):

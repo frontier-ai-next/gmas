@@ -6,7 +6,7 @@ skip_missing_interpreters = true
 factors = [["py312", "py313"]]
 description = "Run tests with coverage on Python {factor_py}"
 dependency_groups = ["test"]
-extras = ["web-search", "mcp", "selenium", "pyg"]
+extras = ["web-search", "mcp", "selenium", "pyg", "computer-use"]
 setenv = { COVERAGE_FILE = ".coverage.{env_name}" }
 commands = [
     [
@@ -49,12 +49,20 @@ commands = [
 ]
 
 [env.typecheck]
-description = "Run ty type checking"
+description = "Run advisory type checking on the release library"
 base_python = ["3.12"]
+ignore_outcome = true
 dependency_groups = ["typecheck", "dev"]
 extras = ["web-search", "mcp", "selenium", "web-fast"]
-ignore_outcome = true
-commands = [["ty", "check", "--ignore", "unresolved-import", "src/", "tests/"]]
+commands = [
+    [
+        "ty",
+        "check",
+        "--ignore",
+        "unresolved-import",
+        "src/",
+    ],
+]
 
 [env.benchmarks]
 description = "Run benchmark suite"
@@ -75,5 +83,5 @@ commands = [
 [env.quick]
 description = "Run tests without coverage for faster feedback"
 dependency_groups = ["test"]
-extras = ["web-search", "mcp", "selenium", "pyg"]
+extras = ["web-search", "mcp", "selenium", "pyg", "computer-use"]
 commands = [["pytest", "-n", "auto", "tests/", "-v", "--tb=short"]]

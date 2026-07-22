@@ -209,6 +209,10 @@ __marimo__/
 
 # Benchmark logs
 benchmark_logs/
+benchmarks_logs/
+
+# Experiment outputs
+/benchmarks/**/log.csv
 
 # Computer use artifacts
 .gmas/

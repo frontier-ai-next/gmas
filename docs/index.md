@@ -1,71 +1,70 @@
-# gMAS Documentation
+# gMAS documentation
 
-A modern framework for building multi-agent systems based on rustworkx.
+gMAS represents an LLM agent team as a mutable role graph. The scheduler reads
+that graph to plan model and tool calls, and runtime policies may update the
+remaining work as agents finish.
 
-## Overview
+![gMAS system overview](assets/system_overview.png)
 
-gMAS is a flexible, high-performance alternative to LangGraph with:
+[Get started](getting-started/quickstart.md){ .md-button .md-button--primary }
+[Browse the API](api/core.md){ .md-button }
+[See benchmarks](benchmarks/index.md){ .md-button }
 
-- **Dynamic topology** - Modify graph structure at runtime
-- **Decentralized memory** - Each agent maintains its own state
-- **Full graph access** - Complete control over adjacency matrices, edge attributes, and node data
-- **Multi-model support** - Different LLMs per agent
-- **Streaming API** - Real-time output during execution
-- **PyTorch Geometric integration** - GNN routing support
+## Start here
 
-## Installation
+- Install and run a first graph: [installation](getting-started/installation.md) and [quick start](getting-started/quickstart.md).
+- Build a workflow: [key concepts](user-guide/key-concepts.md), [RoleGraph](user-guide/core/rolegraph.md), and [MACPRunner](user-guide/core/macp-runner.md).
+- Change work at runtime: [dynamic topology](user-guide/advanced/dynamic-topology.md), [budgets and errors](user-guide/advanced/error-handling.md), and [streaming](user-guide/execution/streaming.md).
+- Review evaluation results: [benchmarks](benchmarks/index.md). Run instructions live in the repository's `benchmarks/` directory.
 
-```bash
-pip install frontier-ai-gmas
-```
+## What you can build
 
-For development:
+<div class="grid cards" markdown>
 
-```bash
-git clone https://github.com/frontier-ai-next/gmas.git
-cd gmas
-uv sync
-```
+-   :material-graph-outline: **Explicit agent graphs**
 
-## Quick Example
+    Model roles, tasks, communication edges, conditions, and execution bounds
+    in one inspectable graph.
 
-```python
-from gmas.core import AgentProfile
-from gmas.builder import build_property_graph
-from gmas.execution import MACPRunner
+-   :material-transit-connection-variant: **Adaptive execution**
 
-# Create agents
-agents = [
-    AgentProfile(
-        agent_id="researcher",
-        display_name="Researcher",
-        description="Gathers information on the topic",
-    ),
-    AgentProfile(
-        agent_id="writer",
-        display_name="Writer",
-        description="Synthesizes research into a final answer",
-    ),
-]
+    Stop, skip, reroute, or recover remaining work through validated topology
+    actions while a run is active.
 
-# Build graph
-graph = build_property_graph(
-    agents,
-    workflow_edges=[("researcher", "writer")],
-    query="What are the latest advances in AI?",
-)
+-   :material-tools: **Model and tool orchestration**
 
-# Execute
-runner = MACPRunner(llm_caller=my_llm_function)
-result = runner.run_round(graph)
+    Mix LLM callers, tools, memory, retries, budgets, and streaming behind one
+    runner contract.
 
-print(result.final_answer)
-```
+-   :material-chart-timeline-variant: **Observable experiments**
 
-## Documentation Sections
+    Capture typed events, token and latency metrics, traces, and reproducible
+    benchmark results.
 
-- [Getting Started](getting-started/installation.md)
-- [User Guide](user-guide/key-concepts.md)
-- [API Reference](api/core.md)
-- [Examples](examples/basic-usage.md)
-- [Contributing](contributing/index.md)
+</div>
+
+## Core model
+
+| Layer | Responsibility |
+| --- | --- |
+| `RoleGraph` | Agents, task nodes, communication edges, conditions, graph features, and execution bounds |
+| `MACPRunner` | Prompt construction, LLM and tool calls, memory, budgets, errors, callbacks, and results |
+| Scheduler | Topological or adaptive execution plans, parallel groups, reachability, and pruning |
+| Topology policy | Optional typed actions that stop, skip, force, rewire, or insert recovery work |
+| Observability | Streaming events, callbacks, token/latency metrics, and file traces |
+
+## Design position
+
+Use gMAS when the role graph needs to stay visible or change during execution.
+It does not speed up an individual model call, and adding agents does not by
+itself improve an answer. Its controls decide which work runs, in what order,
+under which budget, and with what recorded state.
+
+For a careful comparison of that design with LangGraph's compiled graph, conditional routing, commands, and checkpointing, see [gMAS and LangGraph](comparisons/langgraph.md).
+
+## Project maturity
+
+The package supports Python 3.12 and 3.13. The automated test suite covers the
+core graph and runner. Browser automation, external model endpoints, GNN
+dependencies, and benchmark runs require the optional infrastructure listed in
+their guides.

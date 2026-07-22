@@ -64,7 +64,7 @@ def main() -> None:
     with ComputerUseTool(runtime_name="windows_native") as computer_use:
         registry = ToolRegistry().register(computer_use)
         runner = MACPRunner(
-            llm_caller=llm,  # ty:ignore[invalid-argument-type]
+            llm_caller=llm,
             config=RunnerConfig(tool_registry=registry, max_tool_iterations=3),
         )
         result = runner.run_round(graph)

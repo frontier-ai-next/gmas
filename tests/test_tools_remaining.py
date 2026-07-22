@@ -1,6 +1,7 @@
 """Tests for shell.py, function_calling.py, llm_integration.py"""
 
 import sys
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -628,7 +629,7 @@ class TestParseAnthropicResponse:
 
 
 class TestOpenAICaller:
-    def _make_client(self, content="response text", tool_calls=None):
+    def _make_client(self, content="response text", tool_calls=None, *, prompt_tokens=10, completion_tokens=5):
         client = MagicMock()
         message = MagicMock()
         message.content = content
@@ -638,14 +639,25 @@ class TestOpenAICaller:
         choice.message = message
         completion = MagicMock()
         completion.choices = [choice]
+        completion.usage = MagicMock(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        )
         client.chat.completions.create.return_value = completion
         return client
 
     def test_call_without_tools(self):
         client = self._make_client("Hello!")
+        usage = {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+        client.chat.completions.create.return_value.usage = usage
         caller = OpenAICaller(client, model="gpt-4")
         result = caller("Say hello")
         assert result == "Hello!"
+        assert isinstance(result, str)
+        provider_result = cast("Any", result)
+        assert provider_result.usage == usage
+        assert provider_result.raw_response is client.chat.completions.create.return_value
 
     def test_call_with_tools(self):
         tc = MagicMock()
@@ -675,6 +687,24 @@ class TestOpenAICaller:
         call_args = client.chat.completions.create.call_args
         messages = call_args.kwargs["messages"]
         assert not any(m["role"] == "system" for m in messages)
+
+    def test_reasoning_effort_is_forwarded_when_configured(self):
+        client = self._make_client("Hi")
+        caller = OpenAICaller(client, reasoning_effort="low")
+
+        caller("Hello")
+
+        call_args = client.chat.completions.create.call_args
+        assert call_args.kwargs["reasoning_effort"] == "low"
+
+    def test_reasoning_effort_is_omitted_when_not_configured(self):
+        client = self._make_client("Hi")
+        caller = OpenAICaller(client)
+
+        caller("Hello")
+
+        call_args = client.chat.completions.create.call_args
+        assert "reasoning_effort" not in call_args.kwargs
 
     def test_openai_tools_caller_alias(self):
         assert OpenAIToolsCaller is OpenAICaller

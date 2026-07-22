@@ -160,6 +160,7 @@ Result of a round execution (NamedTuple):
 | `memory_config` | `MemoryConfig \| None` | `None` | Memory configuration |
 | `memory_context_limit` | `int` | `5` | Memory entries in prompt |
 | `enable_token_streaming` | `bool` | `False` | Enable token-level streaming |
+| `broadcast_task_to_all` | `bool` | `True` | Send the task query to every agent; when `False`, only agents with a direct live task edge receive it |
 | `enable_dynamic_topology` | `bool` | `False` | Enable topology modifications |
 | `topology_hooks` | `list` | `[]` | Sync topology hooks |
 | `async_topology_hooks` | `list` | `[]` | Async topology hooks |

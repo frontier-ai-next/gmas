@@ -88,13 +88,13 @@ factory.register("claude", my_claude_caller)
 factory.register("local", my_local_llm_caller)
 
 # Use with runner
-runner = MACPRunner(llm_caller_factory=factory)
+runner = MACPRunner(llm_factory=factory)
 ```
 
 ## Budget Control
 
 ```python
-from gmas.execution import MACPRunner, BudgetConfig
+from gmas.execution import MACPRunner, BudgetConfig, RunnerConfig
 
 budget = BudgetConfig(
     total_token_limit=10000,
@@ -102,28 +102,26 @@ budget = BudgetConfig(
     time_limit_seconds=300,
 )
 
-runner = MACPRunner(
-    llm_caller=llm_caller,
-    budget_config=budget,
-)
+config = RunnerConfig(budget_config=budget)
+runner = MACPRunner(llm_caller=llm_caller, config=config)
 ```
 
 ## Memory
 
 ```python
-from gmas.execution import MACPRunner, MemoryConfig
+from gmas.execution import MACPRunner, MemoryConfig, RunnerConfig
 
 memory_config = MemoryConfig(
     working_max_entries=10,
     long_term_max_entries=50,
 )
 
-runner = MACPRunner(
-    llm_caller=llm_caller,
+config = RunnerConfig(
     enable_memory=True,
     memory_config=memory_config,
     memory_context_limit=3,  # Include last 3 in prompt
 )
+runner = MACPRunner(llm_caller=llm_caller, config=config)
 
 # Access memory after execution
 agent_memory = runner.get_agent_memory("agent_id")
@@ -132,18 +130,18 @@ agent_memory = runner.get_agent_memory("agent_id")
 ## Error Handling
 
 ```python
-from gmas.execution import MACPRunner, ErrorPolicy
+from gmas.execution import MACPRunner, ErrorPolicy, RunnerConfig
 
-runner = MACPRunner(
-    llm_caller=llm_caller,
+config = RunnerConfig(
     error_policy=ErrorPolicy.CONTINUE,  # or RAISE, RETRY
     max_retries=3,
 )
+runner = MACPRunner(llm_caller=llm_caller, config=config)
 ```
 
 ## Structured Prompts
 
-For modern chat LLMs:
+For an OpenAI-compatible structured caller:
 
 ```python
 from gmas.execution import MACPRunner, create_openai_structured_caller

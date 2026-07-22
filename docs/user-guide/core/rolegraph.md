@@ -33,7 +33,7 @@ graph.A_com          # torch.Tensor adjacency matrix
 graph.edge_index     # PyTorch Geometric format
 
 # Node access
-agent = graph.get_agent("agent_id")
+agent = graph.get_agent_by_id("agent_id")
 ```
 
 ## Dynamic Modifications

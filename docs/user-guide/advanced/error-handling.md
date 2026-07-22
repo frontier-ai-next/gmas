@@ -80,14 +80,15 @@ class ErrorHandler(BaseCallbackHandler):
 When budget limits are exceeded:
 
 ```python
-from gmas.execution import BudgetConfig
+from gmas.execution import BudgetConfig, RunnerConfig
 
 budget = BudgetConfig(
     total_token_limit=10000,
     time_limit_seconds=300,
 )
 
-runner = MACPRunner(llm_caller=llm_caller, budget_config=budget)
+config = RunnerConfig(budget_config=budget)
+runner = MACPRunner(llm_caller=llm_caller, config=config)
 ```
 
 Budget events fire during execution:

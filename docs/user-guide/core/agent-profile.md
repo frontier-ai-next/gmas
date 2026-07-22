@@ -36,13 +36,13 @@ Each agent maintains its own state (decentralized memory):
 # Read state
 current_state = agent.state
 
-# Update state
-agent.state["last_query"] = "example query"
-agent.state["results"] = [1, 2, 3]
+# Append messages immutably
+agent = agent.append_state({"role": "user", "content": "example query"})
+agent = agent.append_state({"role": "assistant", "content": "example result"})
 
 # Check if key exists
-if "context" in agent.state:
-    context = agent.state["context"]
+if agent.state:
+    latest_message = agent.state[-1]
 ```
 
 ## Agent with Hidden State

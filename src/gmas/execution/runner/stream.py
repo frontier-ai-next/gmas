@@ -2,6 +2,8 @@
 
 from typing import TYPE_CHECKING, cast
 
+from gmas.execution.usage import LLMUsage
+
 from .shared import (
     AgentErrorEvent,
     AgentOutputEvent,
@@ -103,7 +105,7 @@ class RunnerStreamMixin:
                         print(f"Output: {event.content}")
 
         """
-        if not self._has_any_async_caller() and self.async_streaming_llm_caller is None:
+        if not self.has_any_async_caller() and self.async_streaming_llm_caller is None:
             msg = "async_llm_caller, async_llm_callers, llm_factory, or async_streaming_llm_caller required"
             raise ValueError(msg)
 
@@ -138,8 +140,6 @@ class RunnerStreamMixin:
         exec_order = build_execution_order(a_agents, agent_ids, role_graph.role_sequence)
         self._init_memory(agent_ids)
 
-        task_connected = self._get_task_connected_agents(role_graph)
-
         # Emit run start
         yield RunStartEvent(
             run_id=run_id,
@@ -172,7 +172,7 @@ class RunnerStreamMixin:
             incoming_ids = get_incoming_agents(agent_id, a_agents, agent_ids)
             incoming_messages = {aid: messages[aid] for aid in incoming_ids if aid in messages}
 
-            include_query = self._should_include_query(agent_id, task_connected)
+            include_query = self._should_include_query_for_agent(role_graph, agent_id)
             memory_context = self._get_memory_context(agent_id)
             prompt = self._build_prompt(
                 agent, query, incoming_messages, agent_names, memory_context, include_query=include_query
@@ -238,19 +238,20 @@ class RunnerStreamMixin:
                         )
 
                     response = "".join(response_parts)
-                    tokens = self.token_counter(prompt_text) + self.token_counter(response)
+                    usage = LLMUsage()
+                    usage.add_estimate(self.token_counter(prompt_text) + self.token_counter(response))
                 else:
                     # Use regular LLM caller for this agent (with tools support)
                     # prompt (StructuredPrompt) is passed through — _run_agent_with_tools
                     # dispatches via _call_llm when structured_llm_caller is available
-                    response, tokens = self._run_agent_with_tools(
+                    response, usage = self._run_agent_with_tools(
                         caller=caller,
                         prompt=prompt,
                         agent=agent,
                     )
 
                 messages[agent_id] = response
-                total_tokens += tokens
+                total_tokens += usage.total_tokens
                 self._save_to_memory(agent_id, response, incoming_ids)
 
                 is_final = (step_idx == len(exec_order) - 1) or (agent_id == final_agent_id)
@@ -260,7 +261,7 @@ class RunnerStreamMixin:
                     agent_id=agent_id,
                     agent_name=agent_name,
                     content=response,
-                    tokens_used=tokens,
+                    tokens_used=usage.total_tokens,
                     duration_ms=(time.time() - step_start) * 1000,
                     is_final=is_final,
                 )
@@ -378,7 +379,10 @@ class RunnerStreamMixin:
                 incoming_ids = get_incoming_agents(agent_id, a_agents, agent_ids)
                 incoming_messages = {aid: messages[aid] for aid in incoming_ids if aid in messages}
                 memory_context = self._get_memory_context(agent_id)
-                prompt = self._build_prompt(agent, query, incoming_messages, agent_names, memory_context)
+                include_query = self._should_include_query_for_agent(role_graph, agent_id)
+                prompt = self._build_prompt(
+                    agent, query, incoming_messages, agent_names, memory_context, include_query=include_query
+                )
                 agent_prompts[agent_id] = prompt
 
                 yield AgentStartEvent(
@@ -399,7 +403,7 @@ class RunnerStreamMixin:
                     try:
                         _agent = agent_lookup[aid]
                         _caller = self._get_async_caller_for_agent(aid, _agent)
-                        resp, toks = await asyncio.wait_for(
+                        resp, usage = await asyncio.wait_for(
                             self._run_agent_with_tools_async(
                                 async_caller=_caller,
                                 prompt=prompt,
@@ -418,7 +422,7 @@ class RunnerStreamMixin:
                     ) as exc:
                         return (aid, None, 0, str(exc))
                     else:
-                        return (aid, resp, toks, None)
+                        return (aid, resp, usage.total_tokens, None)
 
                 results = await asyncio.gather(*[_call_agent(aid, agent_prompts[aid]) for aid in group_agents])
 
@@ -496,7 +500,8 @@ class RunnerStreamMixin:
                                 )
 
                             response = "".join(response_parts)
-                            tokens = self.token_counter(prompt.text) + self.token_counter(response)
+                            usage = LLMUsage()
+                            usage.add_estimate(self.token_counter(prompt.text) + self.token_counter(response))
                         else:
                             _agent = agent_lookup[agent_id]
                             _caller = self._get_async_caller_for_agent(agent_id, _agent)
@@ -511,7 +516,7 @@ class RunnerStreamMixin:
                                     error_message=error_msg,
                                 )
                                 continue
-                            response, tokens = await asyncio.wait_for(
+                            response, usage = await asyncio.wait_for(
                                 self._run_agent_with_tools_async(
                                     async_caller=_caller,
                                     prompt=prompt,
@@ -521,7 +526,7 @@ class RunnerStreamMixin:
                             )
 
                         messages[agent_id] = response
-                        total_tokens += tokens
+                        total_tokens += usage.total_tokens
                         incoming_ids = get_incoming_agents(agent_id, a_agents, agent_ids)
                         self._save_to_memory(agent_id, response, incoming_ids)
 
@@ -534,7 +539,7 @@ class RunnerStreamMixin:
                             agent_id=agent_id,
                             agent_name=agent_name,
                             content=response,
-                            tokens_used=tokens,
+                            tokens_used=usage.total_tokens,
                             duration_ms=(time.time() - step_start) * 1000,
                             is_final=is_final,
                         )
@@ -668,7 +673,10 @@ class RunnerStreamMixin:
             agent_name = agent_names.get(step.agent_id, step.agent_id)
             incoming = {p: messages[p] for p in step.predecessors if p in messages}
             memory_context = self._get_memory_context(step.agent_id)
-            prompt = self._build_prompt(agent, query, incoming, agent_names, memory_context)
+            include_query = self._should_include_query_for_agent(role_graph, step.agent_id)
+            prompt = self._build_prompt(
+                agent, query, incoming, agent_names, memory_context, include_query=include_query
+            )
 
             yield AgentStartEvent(
                 run_id=run_id,
@@ -680,7 +688,7 @@ class RunnerStreamMixin:
             )
 
             step_start = time.time()
-            result = self._execute_step(step, messages, agent_lookup, agent_names, query)
+            result = self._execute_step(step, messages, agent_lookup, agent_names, query, include_query=include_query)
             step_results[step.agent_id] = result
             execution_order.append(step.agent_id)
 
@@ -879,7 +887,10 @@ class RunnerStreamMixin:
                 agent = agent_lookup.get(step.agent_id)
                 if agent:
                     memory_context = self._get_memory_context(step.agent_id)
-                    prompt = self._build_prompt(agent, query, incoming, agent_names, memory_context)
+                    _include_query = self._should_include_query_for_agent(role_graph, step.agent_id)
+                    prompt = self._build_prompt(
+                        agent, query, incoming, agent_names, memory_context, include_query=_include_query
+                    )
                     yield AgentStartEvent(
                         run_id=run_id,
                         agent_id=step.agent_id,
@@ -890,11 +901,20 @@ class RunnerStreamMixin:
 
             # Execute steps (parallel or sequential)
             if self.config.enable_parallel and len(valid_steps) > 1:
-                results = await self._execute_parallel(valid_steps, messages, agent_lookup, agent_names, query)
+                results = await self._execute_parallel(
+                    valid_steps, messages, agent_lookup, agent_names, query, role_graph
+                )
             else:
                 results = []
                 for step in valid_steps:
-                    r = await self._execute_step_async(step, messages, agent_lookup, agent_names, query)
+                    r = await self._execute_step_async(
+                        step,
+                        messages,
+                        agent_lookup,
+                        agent_names,
+                        query,
+                        include_query=self._should_include_query_for_agent(role_graph, step.agent_id),
+                    )
                     results.append((step, r))
 
             # Process results and emit events

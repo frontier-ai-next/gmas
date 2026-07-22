@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://frontier-ai-next.github.io/gMAS/
+    about: Check the guides and API reference before opening an issue.
+  - name: Report a security vulnerability
+    url: https://github.com/frontier-ai-next/gMAS/security/advisories/new
+    about: Privately report vulnerabilities through GitHub Security Advisories.

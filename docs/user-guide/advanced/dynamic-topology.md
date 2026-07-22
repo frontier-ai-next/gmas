@@ -4,7 +4,8 @@ Modify the graph structure during execution.
 
 ## Overview
 
-Dynamic topology allows the agent graph to change at runtime — agents can be added, removed, skipped, or rerouted based on intermediate results. This is a key differentiator of gMAS.
+Dynamic topology changes the graph or remaining plan after an agent step. A
+policy can add or remove edges, skip work, reroute execution, or stop the run.
 
 ## TopologyAction
 

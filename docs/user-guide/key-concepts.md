@@ -87,7 +87,7 @@ edges = [
 
 ## Dynamic Topology
 
-Modify graph structure at runtime — a key differentiator of gMAS:
+The graph can be changed while a run is in progress:
 
 ```python
 # Add new agent
@@ -112,7 +112,7 @@ Each agent has its own decentralized state:
 
 ```python
 # Access agent state
-agent = graph.get_agent("agent_id")
+agent = graph.get_agent_by_id("agent_id")
 current_state = agent.state
 
 # Update state (returns new instance)

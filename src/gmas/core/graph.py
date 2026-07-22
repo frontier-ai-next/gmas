@@ -1,5 +1,6 @@
 """RoleGraph on rustworkx with dynamic topology support."""
 
+import copy
 from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from enum import StrEnum
@@ -441,6 +442,82 @@ class RoleGraph(BaseModel):
 
         if self.p_matrix is not None:
             object.__setattr__(self, "p_matrix", self.p_matrix[mask][:, mask])
+
+    @staticmethod
+    def _with_updated_edge_weight(edge_data: dict[str, Any], weight: float) -> dict[str, Any]:
+        """Copy edge metadata and update its weight fields."""
+        updated_data = copy.deepcopy(edge_data)
+        updated_data["weight"] = weight
+        attr = updated_data.get("attr")
+        if isinstance(attr, torch.Tensor) and attr.numel() > 0:
+            attr.reshape(-1)[0] = weight
+        elif isinstance(attr, (list, tuple)) and attr:
+            attr_values = list(attr)
+            attr_values[0] = weight
+            updated_data["attr"] = attr_values
+        schema = updated_data.get("schema")
+        if isinstance(schema, dict):
+            updated_data["schema"] = {**schema, "weight": weight}
+        return updated_data
+
+    def update_agent_adjacency(self, agent_adjacency_matrix: torch.Tensor) -> None:
+        """Replace the agent-only adjacency matrix and synchronize graph edges."""
+        agent_ids = [node_id for node_id in self.node_ids if node_id != self.task_node]
+        expected_shape = (len(agent_ids), len(agent_ids))
+        if tuple(agent_adjacency_matrix.shape) != expected_shape:
+            message = (
+                f"agent adjacency shape {tuple(agent_adjacency_matrix.shape)} "
+                f"does not match expected shape {expected_shape}"
+            )
+            raise ValueError(message)
+
+        full_shape = (len(self.node_ids), len(self.node_ids))
+        if tuple(self.A_com.shape) != full_shape:
+            message = (
+                f"combined adjacency shape {tuple(self.A_com.shape)} does not match node count {len(self.node_ids)}"
+            )
+            raise ValueError(message)
+
+        matrix = agent_adjacency_matrix.detach().to(device=self.A_com.device, dtype=self.A_com.dtype).clone()
+        agent_positions = [self.node_ids.index(agent_id) for agent_id in agent_ids]
+        updated_adjacency = self.A_com.clone()
+        positions = torch.tensor(agent_positions, dtype=torch.long, device=updated_adjacency.device)
+        updated_adjacency[positions[:, None], positions[None, :]] = matrix
+        object.__setattr__(self, "A_com", updated_adjacency)
+
+        agent_id_set = set(agent_ids)
+        edge_data_by_pair: dict[tuple[str, str], dict[str, Any]] = {}
+        for edge_idx in list(self.graph.edge_indices()):
+            source_idx, target_idx = self.graph.get_edge_endpoints_by_index(edge_idx)
+            source = self._nid(source_idx)
+            target = self._nid(target_idx)
+            if source not in agent_id_set or target not in agent_id_set:
+                continue
+            edge_data = self.graph.get_edge_data_by_index(edge_idx)
+            edge_data_by_pair[(source, target)] = edge_data if isinstance(edge_data, dict) else {}
+            self.graph.remove_edge_from_index(edge_idx)
+
+        new_connections: dict[str, list[str]] = {agent_id: [] for agent_id in agent_ids}
+        for source_position, source in enumerate(agent_ids):
+            for target_position, target in enumerate(agent_ids):
+                weight = float(matrix[source_position, target_position].item())
+                if weight <= EDGE_THRESHOLD:
+                    continue
+
+                edge_data = self._with_updated_edge_weight(edge_data_by_pair.get((source, target), {}), weight)
+
+                source_idx = self.get_node_index(source)
+                target_idx = self.get_node_index(target)
+                if source_idx is None or target_idx is None:
+                    continue
+                self.graph.add_edge(source_idx, target_idx, edge_data)
+                new_connections[source].append(target)
+
+        for source, targets in new_connections.items():
+            preserved_targets = [
+                target for target in self.role_connections.get(source, []) if target not in agent_id_set
+            ]
+            self.role_connections[source] = [*preserved_targets, *targets]
 
     def add_edge(
         self,

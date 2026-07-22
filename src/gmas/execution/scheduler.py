@@ -5,18 +5,25 @@ Supports both simple topological order and adaptive policies
 that account for edge weights, pruning, and re-planning.
 """
 
+import asyncio
+import copy
 import heapq
 import logging
 from collections import deque
 from collections.abc import Callable
 from enum import StrEnum
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import rustworkx as rx
 import torch
 from pydantic import BaseModel, ConfigDict, Field
 
+if TYPE_CHECKING:
+    from gmas.core.graph import RoleGraph
+    from gmas.execution import MACPResult, MACPRunner
+
 logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Module-level constants
@@ -39,6 +46,7 @@ __all__ = [
     "PruningConfig",
     "RoutingPolicy",
     "StepResult",
+    "agentprune",
     "build_execution_order",
     "extract_agent_adjacency",
     "filter_reachable_agents",
@@ -300,6 +308,8 @@ class StepResult(NamedTuple):
     success: bool
     response: str | None = None
     tokens_used: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
     quality_score: float = 1.0
     error: str | None = None
     fallback_used: bool = False
@@ -594,9 +604,21 @@ class ExecutionPlan(BaseModel):
 
 def extract_agent_adjacency(
     a_com: torch.Tensor,
-    task_idx: int,
+    task_idx: int | None,
 ) -> torch.Tensor:
-    """Remove the task row/column from the agent adjacency matrix."""
+    """
+    Remove the task row/column from the agent adjacency matrix.
+
+    Args:
+        a_com: Combined (agent + task) adjacency matrix.
+        task_idx: Index of the task node to exclude or None.
+
+    Returns:
+        Agent-only adjacency matrix with the task row and column removed.
+
+    """
+    if task_idx is None:
+        return a_com
     n_nodes = a_com.shape[0]
     mask = torch.ones(n_nodes, dtype=torch.bool)
     mask[task_idx] = False
@@ -934,6 +956,242 @@ def _cascade_initial_condition_skip(
                 visited.add(aid)
                 plan.apply_condition_skip(aid)
                 queue.append(aid)
+
+
+def _make_p_under_threshold(tensor: torch.Tensor, p: float) -> torch.Tensor:
+    """
+    Apply quantile-based piecewise linear scaling to non-zero tensor elements.
+
+    Maps upper group (values >= p-quantile) from [quantile, max] to [threshold, 1].
+    Maps lower group (values <= p-quantile) from [min, quantile] to [0.1*threshold, threshold].
+    Zero values are ignored and remain zero. Order is preserved.
+
+    Args:
+        tensor: Input tensor whose non-zero elements will be rescaled.
+        p: Quantile value in [0, 1] used as the split point between the
+            upper and lower scaling groups.
+
+    Returns:
+        A new tensor with scaled values, preserving zeros.
+
+    """
+    nonzero_mask = tensor > 0
+    if not nonzero_mask.any():
+        return torch.zeros_like(tensor)
+    values = tensor[nonzero_mask]
+    quantile_val = torch.quantile(values, p)
+
+    upper_threshold = _DEFAULT_WEIGHT_THRESHOLD + _EPSILON
+    upper_mask = values >= quantile_val
+    max_val = values.max()
+    min_val_upper = quantile_val
+    if max_val > min_val_upper:
+        k_upper = (1 - upper_threshold) / (max_val - min_val_upper)
+        b_upper = 1 - k_upper * max_val
+    else:
+        k_upper = 0
+        b_upper = upper_threshold
+
+    lower_threshold = _DEFAULT_WEIGHT_THRESHOLD
+    lower_mask = values < quantile_val
+    k_lower = 1
+    b_lower = 0
+    if p * values.numel() >= 1.0:
+        min_val = values.min()
+        max_val_lower = quantile_val
+        if max_val_lower > min_val:
+            k_lower = (lower_threshold - 0.1 * lower_threshold) / (max_val_lower - min_val)
+            b_lower = lower_threshold - k_lower * max_val_lower
+        else:
+            k_lower = 0
+            # non-zero but under the threshold
+            b_lower = 0.1 * lower_threshold
+
+    transformed_values = torch.empty_like(values)
+    transformed_values[upper_mask] = k_upper * values[upper_mask] + b_upper
+    transformed_values[lower_mask] = k_lower * values[lower_mask] + b_lower
+    transformed_tensor = torch.zeros_like(tensor)
+    transformed_tensor[nonzero_mask] = transformed_values
+    return transformed_tensor
+
+
+async def _agentprune_result_for_one_query(
+    graph: "RoleGraph",
+    runner: "MACPRunner",
+    query: str,
+    **kwargs: Any,
+) -> "MACPResult":
+    """
+    Run the graph on a single query and return the raw MACPResult.
+
+    Deep-copies both *graph* and *runner* so concurrent Monte Carlo calls
+    do not share mutable state. Sets ``graph.query`` to *query* before
+    execution.
+
+    Args:
+        graph: The role graph to execute.
+        runner: Runner used to execute the graph.
+        query: A single training query string.
+        **kwargs: Extra keyword arguments forwarded to
+            ``MACPRunner.arun_round`` / ``MACPRunner.run_round``.
+
+    Returns:
+        The MACPResult produced by the runner.
+
+    """
+    runner = copy.deepcopy(runner)
+    graph = copy.deepcopy(graph)
+    graph.query = query
+    if runner.has_any_async_caller():
+        return await runner.arun_round(graph, **kwargs)
+    return await asyncio.to_thread(runner.run_round, graph, **kwargs)
+
+
+async def _agentprune_reward_for_all_queries(
+    graph: "RoleGraph",
+    runner: "MACPRunner",
+    queries: list[str],
+    eval_run: Callable[["MACPResult", str, Any], float],
+    answers: list[Any] | None = None,
+    **kwargs: Any,
+) -> float:
+    """
+    Run the graph on every query concurrently and return the mean reward.
+
+    Launches one ``_agentprune_result_for_one_query`` coroutine per query
+    via ``asyncio.gather``, then scores each result with *eval_run* and
+    averages the scores.
+
+    Args:
+        graph: The role graph to evaluate.
+        runner: Runner used to execute the graph.
+        queries: Training query strings to evaluate on.
+        eval_run: Scoring callable with signature
+            ``(result: MACPResult, query: str, ground_truth: Any) -> float``.
+        answers: Optional ground-truth answers aligned with *queries*.
+            Each element is forwarded as the third argument to *eval_run*.
+            Defaults to an empty string per query when ``None``.
+        **kwargs: Runner kwargs.
+
+    Returns:
+        Mean reward across all queries.
+
+    """
+    results = await asyncio.gather(
+        *[_agentprune_result_for_one_query(graph, runner, query, **kwargs) for query in queries]
+    )
+    reward = 0
+    for i, (result, query) in enumerate(zip(results, queries, strict=True)):
+        answer = answers[i] if answers is not None else ""
+        reward += eval_run(result, query, answer)
+    return reward / len(queries)
+
+
+async def agentprune(
+    graph: "RoleGraph",
+    runner: "MACPRunner",
+    queries: list[str],
+    eval_run: Callable[[Any, str, Any], float],
+    answers: list[Any] | None = None,
+    prune_ratio: float = 0.0,
+    mc_num_iterations: int = 2,
+    rl_num_iterations: int = 5,
+    lr: float = 0.1,
+    **runner_kwargs: Any,
+) -> "RoleGraph":
+    """
+    Optimise and optionally prune a multi-agent graph with AgentPrune.
+
+    Implements the RL + Monte Carlo edge-weight optimisation from
+    AgentPrune (https://github.com/yanweiyue/AgentPrune). Runs
+    *rl_num_iterations* gradient steps; each step samples
+    *mc_num_iterations* binary adjacency matrices via Bernoulli draws,
+    executes the graph on every query in *queries*, scores the results
+    with *eval_run*, and back-propagates a REINFORCE-style loss.
+    After training, ``_make_p_under_threshold`` remaps weights so
+    the *prune_ratio* fraction of edges fall below the 0.5 threshold
+    and are effectively removed.
+
+    Args:
+        graph: Source role graph whose adjacency is optimised.
+            The original is not mutated — a deep copy is returned.
+        runner: Runner used to execute the graph during optimisation.
+        queries: Training query strings used to measure graph performance.
+            Must be plain strings (use ``build_task_query`` to convert
+            raw task dicts before calling this function).
+        eval_run: Scoring callable with signature
+            ``(result: MACPResult, query: str, ground_truth: Any) -> float``.
+            Higher scores indicate better graph behaviour.
+        answers: Optional ground-truth values aligned with *queries*.
+            Forwarded as the third argument to *eval_run*.
+            Defaults to an empty string per query when ``None``.
+        prune_ratio: Quantile of edges (by weight) to push below the
+            0.5 presence threshold and thereby prune. ``0.`` reweights edges
+            without removing any.
+        mc_num_iterations: Number of Monte Carlo graph samples drawn
+            per RL step to estimate the policy gradient.
+        rl_num_iterations: Number of AdamW gradient steps.
+        lr: Learning rate passed to the AdamW optimiser.
+        **runner_kwargs: Extra keyword arguments forwarded to the provided runner
+            run_round / arun_round.
+
+    Returns:
+        A new RoleGraph with updated adjacency weights.
+
+    """
+    if not queries:
+        msg = "AgentPrune requires at least one training query"
+        raise ValueError(msg)
+    if answers is not None and len(answers) != len(queries):
+        msg = f"Answers don't match queries size: {len(answers)} and {len(queries)}"
+        raise ValueError(msg)
+    if not 0.0 <= prune_ratio <= 1.0:
+        msg = f"prune_ratio must be between 0 and 1, got {prune_ratio}"
+        raise ValueError(msg)
+    if mc_num_iterations < 1:
+        msg = f"mc_num_iterations must be at least 1, got {mc_num_iterations}"
+        raise ValueError(msg)
+    if rl_num_iterations < 1:
+        msg = f"rl_num_iterations must be at least 1, got {rl_num_iterations}"
+        raise ValueError(msg)
+    if lr <= 0:
+        msg = f"lr must be greater than 0, got {lr}"
+        raise ValueError(msg)
+
+    graph_ = copy.deepcopy(graph)
+    task_idx = None
+    if graph_.task_node is not None:
+        task_idx = graph_.node_ids.index(graph_.task_node)
+    adj_matrix = extract_agent_adjacency(graph_.A_com, task_idx).clone()
+    logits_matrix = torch.nn.Parameter(torch.logit((0.5 * adj_matrix.clone()).clamp(_EPSILON, 1 - _EPSILON)))
+    logits_matrix.requires_grad = True
+    optimizer = torch.optim.AdamW([logits_matrix], lr=lr)
+    for _ in range(rl_num_iterations):
+        rl_loss = torch.tensor(0.0)
+        probs_matrix = torch.sigmoid(logits_matrix) * adj_matrix
+        for _ in range(mc_num_iterations):
+            tmp_adj_matrix = torch.bernoulli(probs_matrix).detach()
+            sampled_graph = copy.deepcopy(graph_)
+            sampled_graph.update_agent_adjacency(tmp_adj_matrix)
+            reward = await _agentprune_reward_for_all_queries(
+                sampled_graph, runner, queries, eval_run, answers, **runner_kwargs
+            )
+            log_prob = tmp_adj_matrix * torch.log(probs_matrix + _EPSILON) + (adj_matrix - tmp_adj_matrix) * torch.log(
+                1 - probs_matrix + _EPSILON
+            )
+            rl_loss += reward * torch.mean(log_prob)
+        rl_loss /= mc_num_iterations
+        rank_loss = torch.norm(probs_matrix, p="nuc")
+        consistency_loss = torch.norm(adj_matrix - probs_matrix)
+        loss = -rl_loss + rank_loss + consistency_loss
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    with torch.no_grad():
+        probs_matrix = torch.sigmoid(logits_matrix) * adj_matrix
+    probs_matrix = _make_p_under_threshold(probs_matrix, prune_ratio)
+    graph_.update_agent_adjacency(probs_matrix.detach())
+    return graph_
 
 
 class AdaptiveScheduler:

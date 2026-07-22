@@ -8,7 +8,14 @@ A simple multi-agent pipeline.
 from gmas.core import AgentProfile
 from gmas.builder import build_property_graph
 from gmas.execution import MACPRunner
-import openai
+import os
+
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["LLM_API_KEY"],
+    base_url=os.environ.get("LLM_BASE_URL"),
+)
 ```
 
 ## Create Agents
@@ -42,11 +49,11 @@ graph = build_property_graph(
 
 ```python
 def llm_caller(prompt: str) -> str:
-    response = openai.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
+    response = client.responses.create(
+        model=os.environ["LLM_MODEL"],
+        input=prompt,
     )
-    return response.choices[0].message.content
+    return response.output_text
 
 runner = MACPRunner(llm_caller=llm_caller)
 result = runner.run_round(graph)

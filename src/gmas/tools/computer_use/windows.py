@@ -51,7 +51,26 @@ from .runtime import ComputerRuntime
 # Win32 constants and ctypes structures
 # ------------------------------------------------------------------
 
-user32 = ctypes.windll.user32
+
+def _load_windows_dll(name: str) -> Any:
+    """Load a DLL through ctypes' Windows-only dynamic loader."""
+    loader = getattr(ctypes, "windll", None)
+    if loader is None:
+        msg = "Windows DLL loading is only available on Windows"
+        raise RuntimeError(msg)
+    return getattr(loader, name)
+
+
+def _open_with_default_app(target: str) -> None:
+    """Open a path or URL with its registered Windows application."""
+    startfile = getattr(os, "startfile", None)
+    if not callable(startfile):
+        msg = "Opening files with the default application is only available on Windows"
+        raise OSError(msg)
+    startfile(target)
+
+
+user32 = _load_windows_dll("user32")
 
 INPUT_MOUSE = 0
 INPUT_KEYBOARD = 1
@@ -266,7 +285,7 @@ class WindowsComputerRuntime(ComputerRuntime):
             }
         if config.start_url:
             try:
-                os.startfile(config.start_url)  # noqa: S606
+                _open_with_default_app(config.start_url)
                 time.sleep(1.0)
             except OSError as exc:
                 logger.warning("computer_use: could not open start_url {!r}: {}", config.start_url, exc)
@@ -540,7 +559,7 @@ class WindowsComputerRuntime(ComputerRuntime):
         if not action.url:
             msg = "navigate requires url"
             raise ValueError(msg)
-        os.startfile(action.url)  # noqa: S606
+        _open_with_default_app(action.url)
         return f"navigated to {action.url}"
 
     def _do_open_app(self, session: ComputerSession, action: ComputerAction) -> str:
@@ -1175,7 +1194,7 @@ class WindowsComputerRuntime(ComputerRuntime):
         """
         try:
             # 2 = PROCESS_PER_MONITOR_DPI_AWARE (Windows 8.1+)
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            _load_windows_dll("shcore").SetProcessDpiAwareness(2)
         except Exception:  # noqa: BLE001
             with contextlib.suppress(Exception):
-                ctypes.windll.user32.SetProcessDPIAware()  # Vista+
+                user32.SetProcessDPIAware()  # Vista+

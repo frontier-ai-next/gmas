@@ -208,8 +208,8 @@ class TestRunRound:
         result = runner.run_round(graph)
         assert isinstance(result, MACPResult)
 
-    def test_broadcast_task_to_all_false(self):
-        """Covers broadcast_task_to_all=False path."""
+    def test_broadcast_task_to_all_false_smoke(self):
+        """Smoke run with flag set; behavioral regression is in test_broadcast_task_to_all.py."""
         config = RunnerConfig(broadcast_task_to_all=False)
         graph = _make_graph(2)
         runner = MACPRunner(llm_caller=_simple_caller, config=config)
@@ -449,9 +449,11 @@ class TestOpenAICallerCreation:
         mock_openai_module.OpenAI.return_value = mock_client
         mock_response = MagicMock()
         mock_response.choices[0].message.content = "test response"
+        mock_response.usage = MagicMock(prompt_tokens=3, completion_tokens=2, total_tokens=5)
         mock_client.chat.completions.create.return_value = mock_response
 
         from gmas.core.agent import AgentLLMConfig
+        from gmas.execution.usage import LLMCallResult
 
         config = AgentLLMConfig(
             model_name="gpt-4",
@@ -463,7 +465,10 @@ class TestOpenAICallerCreation:
             caller = _create_openai_caller_from_config(config)
             assert callable(caller)
             result = caller("test prompt")
-            assert result == "test response"
+            assert isinstance(result, LLMCallResult)
+            assert result.text == "test response"
+            assert result.usage is not None
+            assert result.usage.total_tokens == 5
 
     def test_create_openai_caller_no_openai_raises(self):
         """Covers ImportError path in _create_openai_caller_from_config."""
@@ -685,11 +690,11 @@ class TestHasCallers:
 
     def test_has_any_async_caller_with_default(self):
         runner = MACPRunner(async_llm_caller=_async_caller)
-        assert runner._has_any_async_caller() is True
+        assert runner.has_any_async_caller() is True
 
     def test_has_any_async_caller_none(self):
         runner = MACPRunner()
-        assert runner._has_any_async_caller() is False
+        assert runner.has_any_async_caller() is False
 
 
 # ============================================================================
@@ -1020,12 +1025,14 @@ async def test_async_openai_caller_inner_function():
     """Covers lines 366-371: the inner async caller function."""
     from gmas.core.agent import AgentLLMConfig
     from gmas.execution.runner import _create_async_openai_caller_from_config
+    from gmas.execution.usage import LLMCallResult
 
     mock_openai_module = MagicMock()
     mock_client = MagicMock()
     mock_openai_module.AsyncOpenAI.return_value = mock_client
     mock_response = MagicMock()
     mock_response.choices[0].message.content = "async response"
+    mock_response.usage = MagicMock(prompt_tokens=2, completion_tokens=3, total_tokens=5)
 
     # The caller function uses `await client.chat.completions.create(...)`.
     # We make the mock coroutine-compatible.
@@ -1043,7 +1050,8 @@ async def test_async_openai_caller_inner_function():
     with patch.dict(sys.modules, {"openai": mock_openai_module}):
         caller = _create_async_openai_caller_from_config(config)
         result = await caller("test prompt")
-        assert result == "async response"
+        assert isinstance(result, LLMCallResult)
+        assert result.text == "async response"
 
 
 # ============================================================================

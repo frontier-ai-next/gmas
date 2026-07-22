@@ -25,6 +25,10 @@ else:
 
 def _has_selenium_and_browser() -> bool:
     """Check whether selenium is importable AND at least one browser binary exists."""
+    import os
+
+    if os.environ.get("GMAS_RUN_LIVE_BROWSER_TESTS") != "1":
+        return False
     try:
         from selenium import webdriver as _wd  # noqa: F401
     except ImportError:
@@ -651,9 +655,14 @@ class TestDuckDuckGoProvider:
         provider = DuckDuckGoProvider(timeout=5)
         assert provider._timeout == 5
 
-    def test_search_returns_list(self):
+    def test_search_returns_list(self, monkeypatch):
         """The search method returns a list."""
         provider = DuckDuckGoProvider(timeout=5)
+        monkeypatch.setattr(
+            provider,
+            "_search_ddgs",
+            lambda query, max_results: [{"title": query, "url": "https://example.test", "snippet": "ok"}][:max_results],
+        )
         # No real request in unit tests —
         # just check that the method exists and returns the expected type
         results = provider.search("python", max_results=3)

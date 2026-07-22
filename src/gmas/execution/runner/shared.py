@@ -51,6 +51,7 @@ from .llm import (
     AsyncStructuredLLMCallerProtocol,
     LLMCallerFactory,
     LLMCallerProtocol,
+    LLMCallerResult,
     StructuredLLMCallerProtocol,
 )
 from .prompting import StructuredPrompt, _strip_tool_metadata
@@ -113,6 +114,7 @@ __all__ = [
     "Iterator",
     "LLMCallerFactory",
     "LLMCallerProtocol",
+    "LLMCallerResult",
     "MACPResult",
     "MemoryConfig",
     "ParallelEndEvent",

@@ -4,8 +4,8 @@
 
 - Python 3.12 or higher
 - [uv](https://docs.astral.sh/uv/) (recommended)
-- PyTorch 2.0 or higher
-- rustworkx 0.13 or higher
+- PyTorch 2.11 or higher
+- rustworkx 0.17.1 or higher
 
 ## Basic Installation
 
