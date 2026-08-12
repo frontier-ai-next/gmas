@@ -4,6 +4,7 @@
 
 [![CI](https://github.com/frontier-ai-next/gMAS/actions/workflows/ci.yml/badge.svg)](https://github.com/frontier-ai-next/gMAS/actions/workflows/ci.yml)
 [![Documentation](https://github.com/frontier-ai-next/gMAS/actions/workflows/docs.yml/badge.svg)](https://frontier-ai-next.github.io/gMAS/)
+[![PyPI](https://img.shields.io/pypi/v/frontier-ai-gmas.svg)](https://pypi.org/project/frontier-ai-gmas/)
 [![GitHub release](https://img.shields.io/github/v/release/frontier-ai-next/gMAS?display_name=tag&sort=semver)](https://github.com/frontier-ai-next/gMAS/releases)
 [![Python 3.12–3.13](https://img.shields.io/badge/python-3.12%20%7C%203.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -58,13 +59,20 @@ callbacks:
 gMAS requires Python 3.12 or 3.13.
 
 ```bash
-pip install frontier-ai-gmas
+python -m pip install frontier-ai-gmas
 ```
 
 With `uv`:
 
 ```bash
 uv add frontier-ai-gmas
+```
+
+The distribution is named `frontier-ai-gmas` on PyPI, while the Python import
+package is named `gmas`. Verify the installed version with:
+
+```bash
+python -c "import gmas; print(gmas.__version__)"
 ```
 
 Install only the integrations you need:

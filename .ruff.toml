@@ -19,6 +19,8 @@ ignore = [
     "RUF001", # ambiguous characters
     "RUF002",
     "RUF003",
+    "CPY001", # copyright headers are managed at the repository level
+    "ISC004", # allow readable multiline strings inside collections
 
     "PLC0415",
     "PLE0605",

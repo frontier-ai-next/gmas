@@ -18,7 +18,16 @@ uv pip install frontier-ai-gmas
 ### Using pip
 
 ```bash
-pip install frontier-ai-gmas
+python -m pip install frontier-ai-gmas
+```
+
+The package is published on PyPI as `frontier-ai-gmas` and imported in Python
+as `gmas`:
+
+```python
+import gmas
+
+print(gmas.__version__)
 ```
 
 Core dependencies include:
@@ -77,10 +86,13 @@ uv run prek install
 ## Verify Installation
 
 ```python
+import gmas
+
 from gmas.core import AgentProfile
 from gmas.builder import build_property_graph
 
 agents = [AgentProfile(agent_id="test", display_name="Test")]
 graph = build_property_graph(agents, query="Test")
+print(f"gMAS {gmas.__version__}")
 print(f"Success! Graph has {graph.num_nodes} nodes")
 ```
